@@ -1,0 +1,195 @@
+[
+  {
+    "id": "path_001",
+    "name": "Glucose → Ethanol",
+    "input": "Glucose",
+    "output": "Ethanol",
+    "organism": "Saccharomyces cerevisiae",
+    "category": "Biofuel",
+    "yield_g_per_g": 0.51,
+    "difficulty": "Low",
+    "steps": [
+      {"from": "Glucose", "to": "Glucose-6-P", "enzyme": "Hexokinase", "gene": "HXK2", "ec": "2.7.1.1", "efficiency": 0.99},
+      {"from": "Glucose-6-P", "to": "Fructose-6-P", "enzyme": "Phosphoglucose isomerase", "gene": "PGI1", "ec": "5.3.1.9", "efficiency": 0.97},
+      {"from": "Fructose-6-P", "to": "Fructose-1,6-BP", "enzyme": "Phosphofructokinase", "gene": "PFK1", "ec": "2.7.1.11", "efficiency": 0.95},
+      {"from": "Fructose-1,6-BP", "to": "Pyruvate", "enzyme": "Pyruvate kinase", "gene": "CDC19", "ec": "2.7.1.40", "efficiency": 0.93},
+      {"from": "Pyruvate", "to": "Acetaldehyde", "enzyme": "Pyruvate decarboxylase", "gene": "PDC1", "ec": "4.1.1.1", "efficiency": 0.90},
+      {"from": "Acetaldehyde", "to": "Ethanol", "enzyme": "Alcohol dehydrogenase", "gene": "ADH1", "ec": "1.1.1.1", "efficiency": 0.88}
+    ],
+    "bottleneck": "Pyruvate → Acetaldehyde (PDC1 flux limit)",
+    "known_improvements": [
+      "Overexpress PDC1 for higher PDC activity",
+      "Delete GPD1/GPD2 (glycerol pathway) to redirect flux",
+      "Use xylose isomerase for lignocellulosic feedstocks"
+    ],
+    "co2_kg_per_ton_product": 960
+  },
+  {
+    "id": "path_002",
+    "name": "Glucose → Isobutanol",
+    "input": "Glucose",
+    "output": "Isobutanol",
+    "organism": "Escherichia coli",
+    "category": "Advanced Biofuel",
+    "yield_g_per_g": 0.41,
+    "difficulty": "Medium",
+    "steps": [
+      {"from": "Glucose", "to": "Pyruvate", "enzyme": "Glycolysis (EMP)", "gene": "pgi/pfk/pyk", "ec": "multi", "efficiency": 0.92},
+      {"from": "Pyruvate", "to": "Acetolactate", "enzyme": "Acetolactate synthase", "gene": "ilvBN", "ec": "2.2.1.6", "efficiency": 0.85},
+      {"from": "Acetolactate", "to": "2,3-Dihydroxyisovalerate", "enzyme": "Acetohydroxy acid reductoisomerase", "gene": "ilvC", "ec": "1.1.1.86", "efficiency": 0.83},
+      {"from": "2,3-Dihydroxyisovalerate", "to": "2-Ketoisovalerate", "enzyme": "Dihydroxy acid dehydratase", "gene": "ilvD", "ec": "4.2.1.9", "efficiency": 0.88},
+      {"from": "2-Ketoisovalerate", "to": "Isobutyraldehyde", "enzyme": "2-Ketoacid decarboxylase", "gene": "Kivd", "ec": "4.1.1.72", "efficiency": 0.78},
+      {"from": "Isobutyraldehyde", "to": "Isobutanol", "enzyme": "Alcohol dehydrogenase", "gene": "Adh", "ec": "1.1.1.1", "efficiency": 0.80}
+    ],
+    "bottleneck": "Ketoisovalerate → Isobutyraldehyde (Kivd is rate-limiting)",
+    "known_improvements": [
+      "Use codon-optimized Lactococcus lactis Kivd",
+      "Overexpress ilvC for reductoisomerase step",
+      "Knock out competing fermentative pathways (adhE, ldhA)"
+    ],
+    "co2_kg_per_ton_product": 700
+  },
+  {
+    "id": "path_003",
+    "name": "Glucose → Farnesene (Jet Fuel)",
+    "input": "Glucose",
+    "output": "β-Farnesene (C₁₅H₂₄)",
+    "organism": "Saccharomyces cerevisiae",
+    "category": "Jet Fuel / SAF",
+    "yield_g_per_g": 0.12,
+    "difficulty": "High",
+    "steps": [
+      {"from": "Glucose", "to": "Acetyl-CoA", "enzyme": "Glycolysis + PDH", "gene": "PDC1/ALD6/ACS1", "ec": "multi", "efficiency": 0.88},
+      {"from": "Acetyl-CoA", "to": "HMG-CoA", "enzyme": "HMG-CoA synthase", "gene": "ERG13", "ec": "2.3.3.10", "efficiency": 0.82},
+      {"from": "HMG-CoA", "to": "Mevalonate", "enzyme": "HMG-CoA reductase", "gene": "tHMG1", "ec": "1.1.1.34", "efficiency": 0.80},
+      {"from": "Mevalonate", "to": "IPP/DMAPP", "enzyme": "Mevalonate pathway enzymes", "gene": "ERG12/ERG8/ERG19", "ec": "multi", "efficiency": 0.75},
+      {"from": "IPP/DMAPP", "to": "FPP", "enzyme": "Farnesyl-PP synthase", "gene": "ERG20(F96W-N119W)", "ec": "2.5.1.1", "efficiency": 0.70},
+      {"from": "FPP", "to": "Farnesene", "enzyme": "Farnesene synthase", "gene": "FS (codon-opt.)", "ec": "4.2.3.47", "efficiency": 0.65}
+    ],
+    "bottleneck": "Acetyl-CoA to IPP (MVA pathway flux; ERG9 competes)",
+    "known_improvements": [
+      "Overexpress truncated HMG-CoA reductase (tHMG1)",
+      "Downregulate squalene synthase (ERG9) via CTR3 promoter",
+      "Mutate ERG20 (F96W-N119W) to favor FPP over GPP",
+      "Use two-phase extractive fermentation (dodecane overlay)"
+    ],
+    "co2_kg_per_ton_product": 1200
+  },
+  {
+    "id": "path_004",
+    "name": "CO₂ → Succinate (electro-bio)",
+    "input": "CO₂ + H₂O",
+    "output": "Succinic Acid",
+    "organism": "Actinobacillus succinogenes",
+    "category": "Bio-based Chemical",
+    "yield_g_per_g": 0.75,
+    "difficulty": "Medium",
+    "steps": [
+      {"from": "CO₂", "to": "Bicarbonate", "enzyme": "Carbonic anhydrase", "gene": "cah", "ec": "4.2.1.1", "efficiency": 0.99},
+      {"from": "Phosphoenolpyruvate", "to": "Oxaloacetate", "enzyme": "PEP carboxylase", "gene": "ppc", "ec": "4.1.1.31", "efficiency": 0.88},
+      {"from": "Oxaloacetate", "to": "Malate", "enzyme": "Malate dehydrogenase", "gene": "mdh", "ec": "1.1.1.37", "efficiency": 0.90},
+      {"from": "Malate", "to": "Fumarate", "enzyme": "Fumarase", "gene": "fumB", "ec": "4.2.1.2", "efficiency": 0.92},
+      {"from": "Fumarate", "to": "Succinate", "enzyme": "Fumarate reductase", "gene": "frd", "ec": "1.3.5.4", "efficiency": 0.85}
+    ],
+    "bottleneck": "Fumarate reductase (anaerobic; requires NADH regeneration)",
+    "known_improvements": [
+      "Overexpress PPC for increased CO2 fixation",
+      "Delete lactate dehydrogenase (ldhA) to reduce byproduct",
+      "Use dual-phase cultivation: aerobic growth + anaerobic production"
+    ],
+    "co2_kg_per_ton_product": -1400
+  },
+  {
+    "id": "path_005",
+    "name": "Glucose → 1,3-Propanediol",
+    "input": "Glucose",
+    "output": "1,3-Propanediol",
+    "organism": "Escherichia coli (engineered)",
+    "category": "Bio-based Chemical",
+    "yield_g_per_g": 0.51,
+    "difficulty": "Medium",
+    "steps": [
+      {"from": "Glucose", "to": "DHAP", "enzyme": "Glycolysis (upper)", "gene": "pgi/pfk/fba", "ec": "multi", "efficiency": 0.95},
+      {"from": "DHAP", "to": "Glycerol-3-P", "enzyme": "Glycerol-3-P dehydrogenase", "gene": "DAR1 (yeast)", "ec": "1.1.1.94", "efficiency": 0.88},
+      {"from": "Glycerol-3-P", "to": "Glycerol", "enzyme": "Glycerol-3-P phosphatase", "gene": "GPP2 (yeast)", "ec": "3.1.3.21", "efficiency": 0.90},
+      {"from": "Glycerol", "to": "3-Hydroxypropionaldehyde", "enzyme": "Glycerol dehydratase", "gene": "dhaB (K. pneumoniae)", "ec": "4.2.1.30", "efficiency": 0.82},
+      {"from": "3-Hydroxypropionaldehyde", "to": "1,3-Propanediol", "enzyme": "1,3-PDO oxidoreductase", "gene": "yqhD", "ec": "1.1.1.202", "efficiency": 0.85}
+    ],
+    "bottleneck": "Glycerol dehydratase (coenzyme B12 dependent; cofactor cost)",
+    "known_improvements": [
+      "Express B12-independent mutant of dhaB",
+      "Delete glpK (glycerol kinase) to block glycerol catabolism",
+      "Co-express dha regulon activator (dhaR)"
+    ],
+    "co2_kg_per_ton_product": 850
+  },
+  {
+    "id": "path_006",
+    "name": "Fatty Acids → Biodiesel (FAEE)",
+    "input": "Fatty Acids + Ethanol",
+    "output": "Fatty Acid Ethyl Esters (FAEE)",
+    "organism": "Escherichia coli",
+    "category": "Biodiesel",
+    "yield_g_per_g": 0.90,
+    "difficulty": "Low",
+    "steps": [
+      {"from": "Acetyl-CoA", "to": "Malonyl-CoA", "enzyme": "Acetyl-CoA carboxylase", "gene": "accABCD", "ec": "6.4.1.2", "efficiency": 0.80},
+      {"from": "Malonyl-CoA", "to": "Fatty Acyl-ACP", "enzyme": "Fatty acid synthase (FAS)", "gene": "fabBCDEFGHI", "ec": "multi", "efficiency": 0.75},
+      {"from": "Fatty Acyl-ACP", "to": "Fatty Acid", "enzyme": "Acyl-ACP thioesterase", "gene": "tesA'", "ec": "3.1.2.14", "efficiency": 0.88},
+      {"from": "Fatty Acid", "to": "Fatty Acyl-CoA", "enzyme": "Fatty acyl-CoA synthetase", "gene": "fadD", "ec": "6.2.1.3", "efficiency": 0.85},
+      {"from": "Fatty Acyl-CoA + Ethanol", "to": "FAEE", "enzyme": "Wax ester synthase", "gene": "AtfA (A. baylyi)", "ec": "2.3.1.75", "efficiency": 0.78}
+    ],
+    "bottleneck": "Malonyl-CoA supply (competing pathways drain pool rapidly)",
+    "known_improvements": [
+      "Overexpress ACC (accABCD) to boost malonyl-CoA",
+      "Delete fadE (acyl-CoA dehydrogenase) to block β-oxidation",
+      "Use dynamic metabolic control for malonyl-CoA sensor"
+    ],
+    "co2_kg_per_ton_product": 650
+  },
+  {
+    "id": "path_007",
+    "name": "Lignocellulose → Lactic Acid",
+    "input": "Xylose / Glucose",
+    "output": "Lactic Acid",
+    "organism": "Lactobacillus plantarum",
+    "category": "Bio-based Chemical",
+    "yield_g_per_g": 0.90,
+    "difficulty": "Low",
+    "steps": [
+      {"from": "Xylose", "to": "Xylulose", "enzyme": "Xylose isomerase", "gene": "xylA", "ec": "5.3.1.5", "efficiency": 0.92},
+      {"from": "Xylulose", "to": "Xylulose-5-P", "enzyme": "Xylulokinase", "gene": "xylB", "ec": "2.7.1.17", "efficiency": 0.90},
+      {"from": "Xylulose-5-P", "to": "Pyruvate (via PPP)", "enzyme": "Pentose phosphate pathway", "gene": "tkt/tal", "ec": "multi", "efficiency": 0.88},
+      {"from": "Pyruvate", "to": "Lactate", "enzyme": "L-Lactate dehydrogenase", "gene": "ldh", "ec": "1.1.1.27", "efficiency": 0.96}
+    ],
+    "bottleneck": "Xylose uptake rate (transport limited vs glucose)",
+    "known_improvements": [
+      "Express high-affinity xylose transporter",
+      "Delete acetate kinase (ackA) to reduce byproducts",
+      "Engineer simultaneous glucose/xylose co-consumption"
+    ],
+    "co2_kg_per_ton_product": 120
+  },
+  {
+    "id": "path_008",
+    "name": "Glucose → PHB (Bioplastic)",
+    "input": "Glucose",
+    "output": "Polyhydroxybutyrate (PHB)",
+    "organism": "Cupriavidus necator (Ralstonia)",
+    "category": "Bioplastic",
+    "yield_g_per_g": 0.48,
+    "difficulty": "Medium",
+    "steps": [
+      {"from": "Acetyl-CoA", "to": "Acetoacetyl-CoA", "enzyme": "β-Ketothiolase", "gene": "phaA", "ec": "2.3.1.9", "efficiency": 0.88},
+      {"from": "Acetoacetyl-CoA", "to": "(R)-3-Hydroxybutyryl-CoA", "enzyme": "Acetoacetyl-CoA reductase", "gene": "phaB", "ec": "1.1.1.36", "efficiency": 0.90},
+      {"from": "(R)-3-Hydroxybutyryl-CoA", "to": "PHB polymer", "enzyme": "PHA synthase", "gene": "phaC", "ec": "2.3.1.−", "efficiency": 0.82}
+    ],
+    "bottleneck": "PHA synthase specificity and polymerization rate",
+    "known_improvements": [
+      "Evolve PhaC for broader substrate specificity (PHBV copolymer)",
+      "Increase acetyl-CoA flux by overexpressing ACC",
+      "Use nitrogen-limited fed-batch to trigger PHB accumulation"
+    ],
+    "co2_kg_per_ton_product": 500
+  }
+]
