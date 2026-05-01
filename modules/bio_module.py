@@ -253,6 +253,178 @@ def get_bottleneck_step(pathway: dict) -> dict | None:
     return None
 
 
+# ─── Scenario simulator + optimizer ──────────────────────────────────────────
+
+def _clip01(value: float) -> float:
+    return float(np.clip(value, 0.0, 1.0))
+
+
+def simulate_pathway(pathway: dict, scenario: dict) -> dict:
+    """Simulate pathway yield under user-defined process conditions."""
+    predictor = get_bio_predictor()
+    base = predictor.predict(pathway)
+
+    temperature_c = float(scenario.get("temperature_c", 37.0))
+    ph = float(scenario.get("ph", 7.0))
+    oxygen_mode = str(scenario.get("oxygen_mode", "Microaerobic"))
+    feedstock = str(scenario.get("feedstock", "Glucose"))
+    mutation_intensity = float(scenario.get("mutation_intensity", 0.4))
+    mutation_intensity = float(np.clip(mutation_intensity, 0.0, 1.0))
+
+    # Temperature and pH penalty around biological sweet spot.
+    temp_penalty = max(0.0, 1.0 - abs(temperature_c - 37.0) * 0.015)
+    ph_penalty = max(0.0, 1.0 - abs(ph - 7.0) * 0.10)
+
+    oxygen_factor_map = {
+        "Aerobic": 0.95,
+        "Microaerobic": 1.00,
+        "Anaerobic": 0.92,
+    }
+    oxygen_factor = oxygen_factor_map.get(oxygen_mode, 1.0)
+
+    feedstock_factor_map = {
+        "Glucose": 1.00,
+        "Xylose": 0.90,
+        "Glycerol": 0.93,
+        "CO2": 0.78,
+        "Mixed sugars": 0.96,
+    }
+    feedstock_factor = feedstock_factor_map.get(feedstock, 1.0)
+
+    difficulty = pathway.get("difficulty", "Medium")
+    difficulty_gain_map = {"Low": 0.05, "Medium": 0.10, "High": 0.16}
+    engineering_gain = mutation_intensity * difficulty_gain_map.get(difficulty, 0.10)
+
+    bottleneck = get_bottleneck_step(pathway)
+    bottleneck_eff = float((bottleneck or {}).get("efficiency", 0.8))
+    bottleneck_headroom = max(0.0, 1.0 - bottleneck_eff)
+    bottleneck_relief = mutation_intensity * bottleneck_headroom * 0.20
+
+    process_multiplier = temp_penalty * ph_penalty * oxygen_factor * feedstock_factor
+    adjusted_yield = _clip01(base["yield"] * process_multiplier + engineering_gain + bottleneck_relief)
+
+    # Higher process stress and heavier engineering increase uncertainty and risk.
+    process_stress = (1.0 - temp_penalty) + (1.0 - ph_penalty) + abs(1.0 - oxygen_factor)
+    uncertainty = float(np.clip(base["std"] + process_stress * 0.03 + mutation_intensity * 0.04, 0.01, 0.35))
+    risk_score = float(np.clip(process_stress * 0.30 + mutation_intensity * 0.60, 0.0, 1.0))
+
+    return {
+        "baseline_yield": float(base["yield"]),
+        "predicted_yield": adjusted_yield,
+        "uncertainty": uncertainty,
+        "risk_score": risk_score,
+        "delta_vs_baseline": float(adjusted_yield - base["yield"]),
+        "drivers": {
+            "temperature_penalty": float(temp_penalty),
+            "ph_penalty": float(ph_penalty),
+            "oxygen_factor": float(oxygen_factor),
+            "feedstock_factor": float(feedstock_factor),
+            "engineering_gain": float(engineering_gain),
+            "bottleneck_relief": float(bottleneck_relief),
+        },
+    }
+
+
+def build_intervention_plans(pathway: dict, scenario: dict, top_k: int = 3) -> list:
+    """Return ranked intervention plans with expected gain and risk."""
+    sim = simulate_pathway(pathway, scenario)
+    base_yield = sim["predicted_yield"]
+    bottleneck = get_bottleneck_step(pathway)
+    bottleneck_enzyme = (bottleneck or {}).get("enzyme", "rate-limiting enzyme")
+    bottleneck_gene = (bottleneck or {}).get("gene", "target gene")
+
+    mutation_intensity = float(np.clip(float(scenario.get("mutation_intensity", 0.4)), 0.0, 1.0))
+    oxygen_mode = str(scenario.get("oxygen_mode", "Microaerobic"))
+
+    options = [
+        {
+            "action": f"Overexpress {bottleneck_gene}",
+            "rationale": f"Directly relieves bottleneck at {bottleneck_enzyme}.",
+            "gain": 0.05 + 0.06 * mutation_intensity,
+            "risk": 0.28 + 0.25 * mutation_intensity,
+        },
+        {
+            "action": "Delete competing byproduct pathway genes",
+            "rationale": "Redirects carbon flux toward target product.",
+            "gain": 0.04 + 0.05 * mutation_intensity,
+            "risk": 0.24 + 0.20 * mutation_intensity,
+        },
+        {
+            "action": "Engineer cofactor regeneration (NADH/NADPH)",
+            "rationale": "Improves redox balance and pathway throughput.",
+            "gain": 0.03 + 0.04 * mutation_intensity,
+            "risk": 0.20 + 0.18 * mutation_intensity,
+        },
+        {
+            "action": "Adaptive lab evolution under selective pressure",
+            "rationale": "Improves tolerance and productivity under process stress.",
+            "gain": 0.02 + 0.03 * mutation_intensity,
+            "risk": 0.14 + 0.15 * mutation_intensity,
+        },
+    ]
+
+    # Oxygen-aware hinting for fermentation pathways.
+    if oxygen_mode == "Anaerobic":
+        options.append({
+            "action": "Tune anaerobic ATP maintenance and redox sink",
+            "rationale": "Prevents energy limitation in strict anaerobic operation.",
+            "gain": 0.03,
+            "risk": 0.22,
+        })
+
+    plans = []
+    for i, opt in enumerate(options, start=1):
+        projected_yield = _clip01(base_yield + opt["gain"])
+        projected_risk = float(np.clip((sim["risk_score"] + opt["risk"]) / 2.0, 0.0, 1.0))
+        score = projected_yield - 0.35 * projected_risk
+        plans.append({
+            "id": f"plan_{i:02d}",
+            "action": opt["action"],
+            "rationale": opt["rationale"],
+            "expected_gain": float(opt["gain"]),
+            "projected_yield": projected_yield,
+            "risk": projected_risk,
+            "priority_score": float(score),
+        })
+
+    plans = sorted(plans, key=lambda x: x["priority_score"], reverse=True)
+    return plans[:max(1, top_k)]
+
+
+def counterfactual_sensitivity(pathway: dict, scenario: dict) -> list:
+    """Generate simple counterfactual statements for key knobs."""
+    baseline = simulate_pathway(pathway, scenario)
+    rows = []
+
+    probes = [
+        ("temperature_c", +4.0, "Increase temperature by 4°C"),
+        ("temperature_c", -4.0, "Decrease temperature by 4°C"),
+        ("ph", +0.5, "Increase pH by 0.5"),
+        ("ph", -0.5, "Decrease pH by 0.5"),
+        ("mutation_intensity", +0.2, "Increase mutation intensity by 0.2"),
+        ("mutation_intensity", -0.2, "Decrease mutation intensity by 0.2"),
+    ]
+
+    for key, delta, label in probes:
+        alt = dict(scenario)
+        current = float(alt.get(key, 0.0))
+        if key == "mutation_intensity":
+            alt[key] = float(np.clip(current + delta, 0.0, 1.0))
+        elif key == "ph":
+            alt[key] = float(np.clip(current + delta, 4.5, 9.0))
+        elif key == "temperature_c":
+            alt[key] = float(np.clip(current + delta, 20.0, 50.0))
+        alt_sim = simulate_pathway(pathway, alt)
+        rows.append({
+            "change": label,
+            "delta_yield": float(alt_sim["predicted_yield"] - baseline["predicted_yield"]),
+            "new_yield": float(alt_sim["predicted_yield"]),
+            "new_risk": float(alt_sim["risk_score"]),
+        })
+
+    return sorted(rows, key=lambda x: abs(x["delta_yield"]), reverse=True)
+
+
 # ─── Summary table ────────────────────────────────────────────────────────────
 
 def pathway_summary_df(pathways: list) -> pd.DataFrame:

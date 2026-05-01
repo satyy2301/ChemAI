@@ -43,6 +43,34 @@ def init_db():
             n_samples   INTEGER
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS scenario_runs (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp       TEXT    NOT NULL,
+            pathway_name    TEXT    NOT NULL,
+            scenario_json   TEXT    NOT NULL,
+            predicted_yield REAL,
+            uncertainty     REAL,
+            risk_score      REAL,
+            chosen_plan     TEXT,
+            expected_gain   REAL
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS experiment_queue (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp       TEXT    NOT NULL,
+            exp_type        TEXT    NOT NULL,
+            candidate_name  TEXT    NOT NULL,
+            plan_text       TEXT,
+            predicted_value REAL,
+            risk_score      REAL,
+            payload_json    TEXT,
+            status          TEXT    NOT NULL DEFAULT 'queued',
+            actual_value    REAL,
+            notes           TEXT
+        )
+    """)
     con.commit()
     con.close()
     _seed_demo_data()
@@ -109,6 +137,110 @@ def log_experiment(exp_type: str, name: str, pred_value: float,
     con.close()
 
 
+def log_scenario_run(pathway_name: str, scenario: dict, predicted_yield: float,
+                     uncertainty: float, risk_score: float,
+                     chosen_plan: str = "", expected_gain: float = 0.0):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute(
+        "INSERT INTO scenario_runs (timestamp, pathway_name, scenario_json, predicted_yield,"
+        " uncertainty, risk_score, chosen_plan, expected_gain) VALUES (?,?,?,?,?,?,?,?)",
+        (
+            datetime.now().strftime("%Y-%m-%d %H:%M"),
+            pathway_name,
+            json.dumps(scenario),
+            predicted_yield,
+            uncertainty,
+            risk_score,
+            chosen_plan,
+            expected_gain,
+        )
+    )
+    con.commit()
+    con.close()
+
+
+def queue_experiment(exp_type: str, candidate_name: str, plan_text: str,
+                     predicted_value: float, risk_score: float,
+                     payload: dict | None = None):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute(
+        "INSERT INTO experiment_queue (timestamp, exp_type, candidate_name, plan_text,"
+        " predicted_value, risk_score, payload_json, status) VALUES (?,?,?,?,?,?,?,?)",
+        (
+            datetime.now().strftime("%Y-%m-%d %H:%M"),
+            exp_type,
+            candidate_name,
+            plan_text,
+            predicted_value,
+            risk_score,
+            json.dumps(payload or {}),
+            "queued",
+        )
+    )
+    con.commit()
+    con.close()
+
+
+def get_experiment_queue(status: str | None = None) -> pd.DataFrame:
+    con = sqlite3.connect(DB_PATH)
+    q = "SELECT * FROM experiment_queue"
+    params: tuple = ()
+    if status:
+        q += " WHERE status = ?"
+        params = (status,)
+    q += " ORDER BY timestamp DESC"
+    df = pd.read_sql_query(q, con, params=params)
+    con.close()
+    return df
+
+
+def complete_queued_experiment(queue_id: int, actual_value: float, notes: str = ""):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute(
+        "UPDATE experiment_queue SET status = ?, actual_value = ?, notes = ? WHERE id = ?",
+        ("completed", actual_value, notes, queue_id)
+    )
+    con.commit()
+    con.close()
+
+
+def get_scenario_runs(limit: int = 50) -> pd.DataFrame:
+    con = sqlite3.connect(DB_PATH)
+    q = "SELECT * FROM scenario_runs ORDER BY timestamp DESC LIMIT ?"
+    df = pd.read_sql_query(q, con, params=(limit,))
+    con.close()
+    return df
+
+
+def leaderboard_by_impact(limit: int = 10) -> pd.DataFrame:
+    runs = get_scenario_runs(limit=500)
+    if runs.empty:
+        return pd.DataFrame(columns=[
+            "Pathway", "Runs", "Avg Pred Yield", "Avg Gain", "Avg Risk", "Impact Score"
+        ])
+
+    grouped = runs.groupby("pathway_name", as_index=False).agg(
+        runs=("id", "count"),
+        avg_pred_yield=("predicted_yield", "mean"),
+        avg_gain=("expected_gain", "mean"),
+        avg_risk=("risk_score", "mean"),
+    )
+    grouped["impact_score"] = grouped["avg_pred_yield"] + 0.8 * grouped["avg_gain"] - 0.4 * grouped["avg_risk"]
+    grouped = grouped.sort_values("impact_score", ascending=False).head(limit)
+    grouped = grouped.rename(columns={
+        "pathway_name": "Pathway",
+        "runs": "Runs",
+        "avg_pred_yield": "Avg Pred Yield",
+        "avg_gain": "Avg Gain",
+        "avg_risk": "Avg Risk",
+        "impact_score": "Impact Score",
+    })
+    return grouped
+
+
 def get_experiments(exp_type: str | None = None) -> pd.DataFrame:
     con = sqlite3.connect(DB_PATH)
     q = "SELECT * FROM experiments"
@@ -171,7 +303,7 @@ def get_al_suggestions(candidates: list, top_k: int = 3) -> list:
 
 # ─── Dashboard plots ─────────────────────────────────────────────────────────
 
-def plot_predicted_vs_actual(exp_type: str) -> go.Figure:
+def plot_predicted_vs_actual(exp_type: str | None = None) -> go.Figure:
     df = get_experiments(exp_type)
     if df.empty:
         fig = go.Figure()
