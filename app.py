@@ -19,6 +19,8 @@ import numpy as np
 from modules import catalyst_module as cm
 from modules import bio_module as bm
 from modules import feedback as fb
+from modules import molecular_viewer as mv
+import streamlit.components.v1 as components
 
 # ─── One-time DB init ─────────────────────────────────────────────────────────
 fb.init_db()
@@ -361,7 +363,8 @@ if page == "🏠 Overview":
             ("🤖", "AI Generator",     "Rule-based doping & surface mutation generates novel candidates"),
             ("📈", "ML Predictor",     "Random Forest on element-property features with uncertainty quantification"),
             ("⚡", "Energy Simulator", "BEP-scaled reaction-coordinate diagrams: activation barriers & ΔG per catalyst"),
-            ("🔄", "Feedback Loop",    "SQLite experiment log feeds active learning → model improves each cycle"),
+            ("🔬", "3D Mol Viewer",   "Interactive catalyst surface slabs & metabolite 3D structures via 3Dmol.js"),
+            ("🔄", "Feedback Loop",   "SQLite experiment log feeds active learning → model improves each cycle"),
         ]:
             st.markdown(f"""
             <div class="feature-card" style="margin-bottom:0.75rem;">
@@ -527,6 +530,46 @@ elif page == "⚗️ Catalyst Co-Pilot":
             use_container_width=True,
         )
 
+        # Step 7 — 3D Catalyst Surface Viewer
+        st.divider()
+        st.markdown("""
+        <div class="apple-card">
+            <div class="step-badge">7</div>
+            <div class="step-label">Step 7</div>
+            <div class="step-title">3D Catalyst Surface Structure</div>
+        </div>""", unsafe_allow_html=True)
+
+        _comp  = dive_cat.get("composition", {})
+        _facet = dive_cat.get("surface_facet", "(111)")
+        _n_els = len(_comp)
+        sv1, sv2, sv3 = st.columns(3)
+        sv1.metric("Surface Facet",    _facet)
+        sv2.metric("Elements",         _n_els)
+        sv3.metric("Dominant Element", max(_comp, key=_comp.get) if _comp else "—")
+
+        _surf_col, _info_col = st.columns([3, 1])
+        with _surf_col:
+            _surf_html = mv.make_surface_viewer_html(dive_cat, height=400, width=640)
+            components.html(_surf_html, height=430, scrolling=False)
+        with _info_col:
+            st.markdown("""
+            <div class="apple-card" style="margin-top:0.5rem;">
+              <div class="step-label">LEGEND</div>
+              <div style="font-size:0.78rem;color:var(--text-2);line-height:2;">
+                Atom colours follow the<br>
+                <strong style="color:var(--text-1);">Jmol / CPK scheme</strong><br><br>
+                🟠 Cu &nbsp; ⚪ Pt/Pd<br>
+                🟤 Fe &nbsp; 🟢 Ni<br>
+                🔵 Co &nbsp; 🔵 Mo<br>
+                ⚫ C &nbsp;&nbsp; 🔴 O<br>
+                🔵 N &nbsp;&nbsp; 🟡 S<br><br>
+                Drag to <strong style="color:var(--text-1);">rotate</strong><br>
+                Scroll to <strong style="color:var(--text-1);">zoom</strong><br>
+                Surface: {}-layer FCC slab<br>
+                Grid: 5×5 atoms/layer
+              </div>
+            </div>""".format(4), unsafe_allow_html=True)
+
         # Active learning suggestions
         al_picks = fb.get_al_suggestions(variants, top_k=3)
         if al_picks:
@@ -667,6 +710,51 @@ elif page == "🧬 Bio Pathway Designer":
             df_steps = pd.DataFrame(chosen_path["steps"])
             df_steps["efficiency %"] = (df_steps["efficiency"] * 100).round(1)
             st.dataframe(df_steps[["from","to","enzyme","gene","ec","efficiency %"]], use_container_width=True, hide_index=True)
+
+        # ── 3D Metabolite Viewer ─────────────────────────────────────────────
+        st.markdown('<div class="section-header">🔬 Metabolite 3D Viewer</div>', unsafe_allow_html=True)
+
+        # Collect all unique node labels for this pathway
+        _step_nodes: list[str] = []
+        for _s in chosen_path.get("steps", []):
+            for _k in ("from", "to"):
+                _v = str(_s.get(_k, "")).strip()
+                if _v and _v not in _step_nodes:
+                    _step_nodes.append(_v)
+
+        if _step_nodes:
+            mol_col, view_col = st.columns([1, 3])
+            with mol_col:
+                st.markdown("""
+                <div class="apple-card" style="margin-bottom:0.6rem;">
+                  <div class="step-label">SELECT METABOLITE</div>
+                </div>""", unsafe_allow_html=True)
+                _chosen_node = st.selectbox(
+                    "Metabolite",
+                    _step_nodes,
+                    label_visibility="collapsed",
+                    key=f"mol3d_{chosen_path['id']}",
+                )
+                _mol_html, _mol_name = mv.make_molecule_viewer_html(
+                    _chosen_node, height=380, width=440,
+                )
+                st.markdown(f"""
+                <div class="apple-card" style="margin-top:0.5rem;">
+                  <div class="step-label">STRUCTURE INFO</div>
+                  <div style="font-size:0.82rem;color:var(--text-1);font-weight:600;
+                              margin-bottom:4px;">{_mol_name}</div>
+                  <div style="font-size:0.75rem;color:var(--text-2);line-height:1.6;">
+                    Pathway node:<br>
+                    <strong style="color:var(--cyan);">{_chosen_node}</strong><br><br>
+                    🔵 N &nbsp; ⚫ C &nbsp; 🔴 O<br>
+                    🟡 S &nbsp; 🟠 P &nbsp; ⚪ H<br><br>
+                    Drag to rotate · Scroll to zoom
+                  </div>
+                </div>""", unsafe_allow_html=True)
+            with view_col:
+                components.html(_mol_html, height=400, scrolling=False)
+        else:
+            st.info("No metabolite nodes found for this pathway.")
 
         # Bottleneck + Mutations
         col_b, col_m = st.columns(2)
