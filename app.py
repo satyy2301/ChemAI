@@ -20,6 +20,7 @@ from modules import catalyst_module as cm
 from modules import bio_module as bm
 from modules import feedback as fb
 from modules import molecular_viewer as mv
+from modules import db_integration as db
 import streamlit.components.v1 as components
 
 # ─── One-time DB init ─────────────────────────────────────────────────────────
@@ -321,6 +322,16 @@ with st.sidebar:
     st.divider()
     st.caption("Theme 4 · AI for Catalyst & Pathway Discovery")
     st.caption("Stack: Streamlit · scikit-learn · Plotly · SQLite")
+    st.divider()
+    with st.expander("🔑 Database API Keys"):
+        st.caption("Materials Project (optional)")
+        _sidebar_mp_key = st.text_input(
+            "MP API Key", type="password",
+            placeholder="Paste your key…",
+            help="Free key at materialsproject.org",
+            key="sidebar_mp_key",
+        )
+        st.caption("Catalysis Hub: no key needed")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -440,6 +451,109 @@ elif page == "⚗️ Catalyst Co-Pilot":
         "Stability": c["stability_score"], "Selectivity": c["selectivity_score"], "Source": c["source"],
     } for c in known])
     st.dataframe(df_known, use_container_width=True, hide_index=True)
+
+    # ── Scientific Database Sources ────────────────────────────────────────────
+    st.markdown("""
+    <div class="apple-card" style="border-color:rgba(0,212,255,0.18);">
+        <div class="step-badge" style="background:linear-gradient(135deg,#00D4FF,#0A84FF);">DB</div>
+        <div class="step-label">LIVE DATA</div>
+        <div class="step-title">Scientific Database Sources</div>
+        <div style="font-size:0.78rem;color:var(--text-2);margin-top:4px;">
+            Catalysis Hub (DFT) &nbsp;·&nbsp; Materials Project &nbsp;·&nbsp; BRENDA Enzymes
+        </div>
+    </div>""", unsafe_allow_html=True)
+
+    _db_ref_cat = known[0] if known else {"composition": {"Pt": 1.0}}
+    _db_mp_key  = st.session_state.get("sidebar_mp_key", "")
+    _db_cache_key = f"db_results_{chosen_key}"
+
+    _db_col1, _db_col2 = st.columns([3, 1])
+    with _db_col2:
+        _db_fetch = st.button("Fetch from Databases", key=f"dbfetch_{chosen_key}",
+                              use_container_width=True)
+    with _db_col1:
+        st.caption("Retrieves real DFT reaction data and enzyme kinetics for the selected reaction. "
+                   "Catalysis Hub results are filtered to the dominant catalyst element.")
+
+    if _db_fetch:
+        with st.spinner("Querying Catalysis Hub · Materials Project · BRENDA…"):
+            st.session_state[_db_cache_key] = db.fetch_all(_db_ref_cat, chosen_key, _db_mp_key)
+
+    if _db_cache_key in st.session_state:
+        _db_res = st.session_state[_db_cache_key]
+        _ch_res = _db_res.get("catalysis_hub", {})
+        _mp_res = _db_res.get("materials_project", {})
+        _br_res = _db_res.get("brenda", {})
+
+        _tab_ch, _tab_mp, _tab_br = st.tabs([
+            "⚡ Catalysis Hub (DFT)",
+            "🔷 Materials Project",
+            "🧬 BRENDA Enzymes",
+        ])
+
+        with _tab_ch:
+            _ch_elem = _ch_res.get("element", "?")
+            if _ch_res.get("status") == "ok":
+                _ch_rows = _ch_res["rows"]
+                _df_ch = pd.DataFrame([{
+                    "Surface": r["surface"],
+                    "Facet": r["facet"],
+                    "Reactants (JSON)": r["reactants"][:45] + ("…" if len(r["reactants"]) > 45 else ""),
+                    "Products (JSON)": r["products"][:40] + ("…" if len(r["products"]) > 40 else ""),
+                    "ΔE (eV)": round(r["reaction_energy_ev"], 4) if r["reaction_energy_ev"] is not None else "—",
+                    "Eₐ (eV)": round(r["activation_energy_ev"], 4) if r["activation_energy_ev"] is not None else "—",
+                    "DFT Functional": r["dft_functional"],
+                } for r in _ch_rows])
+                st.markdown(f"**{len(_ch_rows)} DFT entries** for `{_ch_elem}` surface — source: "
+                            "[Catalysis Hub](https://www.catalysis-hub.org/)")
+                st.dataframe(_df_ch, use_container_width=True, hide_index=True)
+            elif _ch_res.get("status") == "no_data":
+                st.info(f"No DFT entries found for **{_ch_elem}** surface matching "
+                        f"**{chosen_label}** reaction species in Catalysis Hub.")
+            else:
+                st.error(f"Catalysis Hub error: {_ch_res.get('error', 'unknown')}")
+
+        with _tab_mp:
+            if _mp_res.get("status") == "ok":
+                _df_mp = pd.DataFrame([{
+                    "Material ID": r["material_id"],
+                    "Formula": r["formula"],
+                    "Eₓ/atom (eV)": r["formation_energy_ev_atom"],
+                    "E above hull (eV)": r["energy_above_hull_ev"],
+                    "Band gap (eV)": r["band_gap_ev"],
+                    "Sites": r["n_sites"],
+                } for r in _mp_res["rows"]])
+                st.markdown("**Materials Project** stability & electronic structure — "
+                            "[materialsproject.org](https://materialsproject.org)")
+                st.dataframe(_df_mp, use_container_width=True, hide_index=True)
+            elif _mp_res.get("status") == "no_key":
+                st.info("Enter your free Materials Project API key in the sidebar "
+                        "(**Database API Keys**) to fetch formation energies and stability data.")
+            elif _mp_res.get("status") == "no_data":
+                st.info("No Materials Project entries found for this catalyst composition.")
+            else:
+                st.error(f"Materials Project error: {_mp_res.get('error', 'unknown')}")
+
+        with _tab_br:
+            if _br_res.get("status") == "ok":
+                _df_br = pd.DataFrame([{
+                    "Enzyme": r["enzyme"],
+                    "EC Number": r["ec_number"],
+                    "Substrate": r["substrate"],
+                    "Product": r["product"],
+                    "Kₘ (mM)": r.get("km_mm"),
+                    "kcat (s⁻¹)": r.get("kcat_s"),
+                    "Organism": r["organism"],
+                    "pH opt.": r["ph_optimum"],
+                    "T opt. (°C)": r["temp_optimum_c"],
+                } for r in _br_res["rows"]])
+                st.markdown("**BRENDA** enzyme kinetics — curated reference data "
+                            "([brenda-enzymes.org](https://www.brenda-enzymes.org/))")
+                st.dataframe(_df_br, use_container_width=True, hide_index=True)
+            else:
+                st.info("No curated BRENDA enzyme data for this reaction type. "
+                        "BRENDA data is most relevant for bio-catalytic reactions.")
+
     st.divider()
 
     # Step 3
