@@ -277,9 +277,9 @@ def plot_tradeoff(catalysts: list, highlight_id: str | None = None) -> go.Figure
 
     fig = go.Figure()
 
-    for i, row in df.iterrows():
+    for point_idx, (_, row) in enumerate(df.iterrows()):
         is_ai = row.get("source") == "AI-generated"
-        marker_size = _safe_float(sizes[i], fallback=14.0)
+        marker_size = _safe_float(sizes[point_idx], fallback=14.0)
         if marker_size < 0:
             marker_size = 14.0
         activity = _safe_float(row.get("activity_score"), fallback=0.0)
@@ -293,7 +293,7 @@ def plot_tradeoff(catalysts: list, highlight_id: str | None = None) -> go.Figure
             mode="markers+text",
             marker=dict(
                 size=marker_size,
-                color=colors[i],
+                color=colors[point_idx],
                 opacity=0.85,
                 line=dict(width=1.5, color="#ffffff"),
             ),
@@ -393,5 +393,355 @@ def plot_composition_bar(catalyst: dict) -> go.Figure:
         paper_bgcolor="#0E1117",
         font=dict(color="#FAFAFA"),
         height=300,
+    )
+    return fig
+
+
+# ─── Reaction Energy Profiles (BEP-scaled, catalyst-specific) ────────────────
+
+# Reference adsorption energies (eV) for a representative catalyst per reaction
+_REACTION_REFS: dict[str, float] = {
+    "CO2_to_Methanol": -0.72,
+    "Fischer_Tropsch": -0.85,
+    "HER":             -0.30,
+    "N2_Fixation":     -0.65,
+    "RWGS":            -0.58,
+    "Methanation":     -0.80,
+    "CO_Oxidation":    -0.45,
+    "OER":             -0.38,
+}
+
+# Base energy profiles per reaction (eV, relative to reactants = 0.00).
+# Each entry: list of (label, energy) for intermediates; ts_energies[i] is
+# the transition-state energy between intermediate i and i+1.
+# Constraint: ts_energies[i] >= max(E_i, E_{i+1}).
+_BASE_PROFILES: dict[str, dict] = {
+    "CO2_to_Methanol": {
+        "equation": "CO₂ + 3H₂ → CH₃OH + H₂O",
+        "intermediates": [
+            ("CO₂ + 3H₂",     0.00),
+            ("CO₂* + 3H*",    0.18),
+            ("HCOO* + 2H*",  -0.45),
+            ("H₂COO* + H*",  -0.80),
+            ("H₂CO* + H₂O*", -1.22),
+            ("H₃CO* + H₂O",  -1.60),
+            ("CH₃OH + H₂O",  -0.88),
+        ],
+        "ts_energies": [0.42, 0.55, -0.08, -0.42, -0.88, -0.53],
+    },
+    "Fischer_Tropsch": {
+        "equation": "CO + 2H₂ → −CH₂− + H₂O",
+        "intermediates": [
+            ("CO + 2H₂",      0.00),
+            ("CO* + 2H*",     0.12),
+            ("CHO* + H*",    -0.35),
+            ("CH* + H₂O*",   -0.82),
+            ("CH₂* (chain)", -1.28),
+            ("−CH₂− + H₂O",  -0.95),
+        ],
+        "ts_energies": [0.45, 0.52, -0.10, -0.48, -0.92],
+    },
+    "HER": {
+        "equation": "2H⁺ + 2e⁻ → H₂",
+        "intermediates": [
+            ("2H⁺ + 2e⁻",       0.00),
+            ("H* + H⁺ + e⁻",   -0.30),
+            ("2H* (Tafel)",     -0.60),
+            ("H₂(g)",           -0.45),
+        ],
+        "ts_energies": [0.18, -0.08, 0.28],
+    },
+    "N2_Fixation": {
+        "equation": "N₂ + 3H₂ → 2NH₃",
+        "intermediates": [
+            ("N₂ + 3H₂",    0.00),
+            ("N₂* + 3H*",   0.22),
+            ("2N* + 3H*",  -0.18),
+            ("N*+NH*+2H*", -0.62),
+            ("2NH* + 2H*", -1.05),
+            ("NH₂* + NH₃", -1.48),
+            ("2NH₃",       -0.92),
+        ],
+        "ts_energies": [0.65, 1.12, 0.35, -0.18, -0.62, -0.65],
+    },
+    "RWGS": {
+        "equation": "CO₂ + H₂ → CO + H₂O",
+        "intermediates": [
+            ("CO₂ + H₂",   0.00),
+            ("CO₂* + H*",  0.15),
+            ("HCOO*",     -0.38),
+            ("CO* + OH*",  -0.72),
+            ("CO + H₂O",  -0.42),
+        ],
+        "ts_energies": [0.38, 0.48, -0.05, -0.20],
+    },
+    "Methanation": {
+        "equation": "CO₂ + 4H₂ → CH₄ + 2H₂O",
+        "intermediates": [
+            ("CO₂ + 4H₂",        0.00),
+            ("CO* + H₂O + 3H*",  -0.15),
+            ("C* + H₂O + 3H*",   -0.55),
+            ("CH* + H₂O + 2H*",  -0.98),
+            ("CH₂* + H₂O + H*",  -1.35),
+            ("CH₃* + H₂O",       -1.68),
+            ("CH₄ + 2H₂O",       -1.28),
+        ],
+        "ts_energies": [0.32, 0.25, -0.08, -0.45, -0.88, -1.25],
+    },
+    "CO_Oxidation": {
+        "equation": "CO + ½O₂ → CO₂",
+        "intermediates": [
+            ("CO + ½O₂",  0.00),
+            ("CO* + O*", -0.42),
+            ("CO₂*",     -0.18),
+            ("CO₂(g)",   -1.45),
+        ],
+        "ts_energies": [0.18, 0.42, 0.05],
+    },
+    "OER": {
+        "equation": "2H₂O → O₂ + 4H⁺ + 4e⁻",
+        "intermediates": [
+            ("2H₂O",            0.00),
+            ("OH* + H⁺ + e⁻",  0.45),
+            ("O* + H⁺ + e⁻",   0.98),
+            ("OOH* + H⁺ + e⁻", 1.52),
+            ("O₂ + H⁺ + e⁻",   1.23),
+        ],
+        "ts_energies": [0.72, 1.25, 1.68, 1.80],
+    },
+}
+
+
+def _scale_profile_for_catalyst(profile: dict, catalyst: dict,
+                                 reaction_key: str) -> dict:
+    """BEP-linear scaling: stronger-binding catalyst stabilises intermediates."""
+    ref_ads = _REACTION_REFS.get(reaction_key, -0.60)
+    cat_ads = float(catalyst.get("adsorption_energy", ref_ads))
+    delta = cat_ads - ref_ads   # negative → stronger binding than reference
+    alpha = 0.55                # BEP slope
+
+    ints = profile["intermediates"]
+    ts   = profile["ts_energies"]
+    n    = len(ints)
+
+    # Keep reactant (index 0) at 0.00 and product (index -1) at fixed ΔG_rxn.
+    scaled_ints = [ints[0]]
+    for label, E in ints[1:-1]:
+        scaled_ints.append((label, round(E + alpha * delta, 3)))
+    scaled_ints.append(ints[-1])
+
+    # Scale TS; clamp so each TS stays above both adjacent intermediates.
+    scaled_ts = []
+    for i, E_ts in enumerate(ts):
+        E_left  = scaled_ints[i][1]
+        E_right = scaled_ints[i + 1][1]
+        E_ts_s  = round(E_ts + alpha * delta, 3)
+        E_ts_s  = max(E_ts_s, max(E_left, E_right) + 0.05)
+        scaled_ts.append(E_ts_s)
+
+    return {**profile, "intermediates": scaled_ints, "ts_energies": scaled_ts}
+
+
+def get_energy_profile_data(reaction_key: str, catalyst: dict) -> dict | None:
+    """Return the BEP-scaled energy profile for a given catalyst and reaction."""
+    base = _BASE_PROFILES.get(reaction_key)
+    if base is None:
+        return None
+    return _scale_profile_for_catalyst(base, catalyst, reaction_key)
+
+
+def plot_reaction_energy_profile(reaction_key: str, catalyst: dict) -> go.Figure:
+    """Smooth reaction-coordinate diagram with activation-energy annotation."""
+    from scipy.interpolate import CubicSpline
+
+    data = get_energy_profile_data(reaction_key, catalyst)
+    if data is None:
+        fig = go.Figure()
+        fig.update_layout(
+            title="Energy profile not available for this reaction",
+            paper_bgcolor="#0E1117", font=dict(color="#FAFAFA"),
+        )
+        return fig
+
+    ints = data["intermediates"]
+    ts_e = data["ts_energies"]
+    n    = len(ints)
+
+    # Build x/y arrays: intermediate at integer x, TS at half-integer x.
+    x_pts, y_pts = [], []
+    for i, (_, E) in enumerate(ints):
+        x_pts.append(float(i))
+        y_pts.append(E)
+        if i < n - 1:
+            x_pts.append(float(i) + 0.5)
+            y_pts.append(ts_e[i])
+
+    cs     = CubicSpline(np.array(x_pts), np.array(y_pts))
+    x_fine = np.linspace(0, n - 1, 600)
+    y_fine = cs(x_fine)
+
+    # Activation barriers and rate-limiting step (highest Ea from left side).
+    barriers = [ts_e[i] - ints[i][1] for i in range(n - 1)]
+    rls      = int(np.argmax(barriers))
+    Ea_rls   = barriers[rls]
+    delta_G  = ints[-1][1] - ints[0][1]
+    dg_color = "#30D158" if delta_G < 0 else "#FF453A"
+
+    fig = go.Figure()
+
+    # Shaded area below the curve.
+    fig.add_trace(go.Scatter(
+        x=np.concatenate([x_fine, x_fine[::-1]]),
+        y=np.concatenate([y_fine, np.full(len(y_fine), min(y_fine) - 0.3)]),
+        fill="toself",
+        fillcolor="rgba(0,212,255,0.06)",
+        line=dict(width=0),
+        hoverinfo="skip",
+        showlegend=False,
+    ))
+
+    # Smooth energy curve.
+    fig.add_trace(go.Scatter(
+        x=x_fine, y=y_fine,
+        mode="lines",
+        line=dict(color="#00D4FF", width=2.5),
+        hoverinfo="skip",
+        showlegend=False,
+    ))
+
+    # Zero-energy reference line.
+    fig.add_shape(type="line", x0=-0.3, x1=n - 0.7, y0=0, y1=0,
+                  line=dict(color="#333", width=1, dash="dot"))
+
+    # Horizontal plateau bars at each intermediate.
+    hw = 0.20
+    for i, (_, E) in enumerate(ints):
+        fig.add_shape(
+            type="line",
+            x0=i - hw, x1=i + hw, y0=E, y1=E,
+            line=dict(color="#FFFFFF", width=3),
+        )
+
+    # Intermediate scatter (markers + energy labels).
+    for i, (label, E) in enumerate(ints):
+        color = "#FF6B6B" if i in (rls, rls + 1) else "#A8FF78"
+        tpos  = "top center" if i % 2 == 0 else "bottom center"
+        fig.add_trace(go.Scatter(
+            x=[float(i)], y=[E],
+            mode="markers+text",
+            marker=dict(size=10, color=color, line=dict(width=2, color="#fff")),
+            text=[f"{E:+.2f}"],
+            textposition=tpos,
+            textfont=dict(size=9, color=color),
+            hovertemplate=f"<b>{label}</b><br>E = {E:+.3f} eV<extra></extra>",
+            showlegend=False,
+        ))
+
+    # Transition-state markers.
+    for i, E_ts in enumerate(ts_e):
+        mc  = "#FF453A" if i == rls else "#FF9F0A"
+        fig.add_trace(go.Scatter(
+            x=[i + 0.5], y=[E_ts],
+            mode="markers",
+            marker=dict(size=11, color=mc, symbol="diamond",
+                        line=dict(width=2, color="#fff")),
+            hovertemplate=(
+                f"<b>TS {i + 1}</b><br>"
+                f"E_ts = {E_ts:+.3f} eV<br>"
+                f"Eₐ = {barriers[i]:.3f} eV"
+                + (" ← rate-limiting" if i == rls else "")
+                + "<extra></extra>"
+            ),
+            showlegend=False,
+        ))
+
+    # Ea bracket for rate-limiting step.
+    x_rls  = float(rls)
+    x_ts   = rls + 0.5
+    E_left = ints[rls][1]
+    E_ts   = ts_e[rls]
+    fig.add_shape(type="line",
+                  x0=x_rls, x1=x_rls, y0=E_left, y1=E_ts,
+                  line=dict(color="#FF453A", width=1.5, dash="dash"))
+    fig.add_shape(type="line",
+                  x0=x_rls, x1=x_ts, y0=E_ts, y1=E_ts,
+                  line=dict(color="#FF453A", width=1, dash="dot"))
+    fig.add_annotation(
+        x=x_rls + 0.08, y=(E_left + E_ts) / 2,
+        text=f"Eₐ = {Ea_rls:.2f} eV<br>(rate-limiting)",
+        showarrow=False,
+        font=dict(size=10, color="#FF453A"),
+        bgcolor="rgba(255,69,58,0.15)",
+        bordercolor="#FF453A",
+        borderwidth=1,
+        borderpad=4,
+        xanchor="left",
+    )
+
+    # ΔG annotation near the product.
+    fig.add_annotation(
+        x=n - 1, y=ints[-1][1],
+        text=f"ΔG = {delta_G:+.2f} eV",
+        showarrow=True,
+        arrowhead=2,
+        arrowcolor=dg_color,
+        ax=40, ay=0,
+        font=dict(size=10, color=dg_color),
+        bgcolor=f"rgba({'48,209,88' if delta_G < 0 else '255,69,58'},0.15)",
+        bordercolor=dg_color,
+        borderwidth=1,
+        borderpad=4,
+    )
+
+    # Legend dummy traces.
+    for color, sym, lbl in [
+        ("#A8FF78", "circle",  "Intermediate"),
+        ("#FF6B6B", "circle",  "Rate-limiting intermediate"),
+        ("#FF453A", "diamond", "Rate-limiting TS"),
+        ("#FF9F0A", "diamond", "Transition state"),
+    ]:
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None], mode="markers",
+            marker=dict(color=color, symbol=sym, size=9),
+            name=lbl,
+        ))
+
+    fig.update_layout(
+        title=dict(
+            text=(
+                f"<b>Reaction Energy Profile</b> — {data['equation']}<br>"
+                f"<sup>Catalyst: {catalyst.get('name', '')} · "
+                f"ΔG = {delta_G:+.2f} eV · "
+                f"Eₐ (RLS) = {Ea_rls:.2f} eV</sup>"
+            ),
+            font=dict(size=14),
+        ),
+        xaxis=dict(
+            tickmode="array",
+            tickvals=list(range(n)),
+            ticktext=[lbl for lbl, _ in ints],
+            tickangle=-35,
+            tickfont=dict(size=9),
+            gridcolor="#1A1A1A",
+            range=[-0.4, n - 0.6],
+        ),
+        yaxis=dict(
+            title="Relative Energy (eV)",
+            gridcolor="#1A1A1A",
+            zeroline=True,
+            zerolinecolor="#444",
+            zerolinewidth=1,
+        ),
+        plot_bgcolor="#0E1117",
+        paper_bgcolor="#0E1117",
+        font=dict(color="#FAFAFA", family="Inter"),
+        legend=dict(
+            bgcolor="rgba(20,20,30,0.85)",
+            bordercolor="#333",
+            x=0.01, y=0.99,
+            xanchor="left", yanchor="top",
+        ),
+        height=520,
+        margin=dict(l=60, r=80, t=100, b=130),
     )
     return fig

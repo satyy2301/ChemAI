@@ -357,10 +357,11 @@ if page == "🏠 Overview":
     with col_a:
         st.markdown('<div class="section-header">System Architecture</div>', unsafe_allow_html=True)
         for icon, title, desc in [
-            ("🗄️", "Data Layer",    "Open Catalyst Project · Materials Project · BRENDA enzyme databases"),
-            ("🤖", "AI Generator",  "Rule-based doping & surface mutation generates novel candidates"),
-            ("📈", "ML Predictor",  "Random Forest on element-property features with uncertainty quantification"),
-            ("🔄", "Feedback Loop", "SQLite experiment log feeds active learning → model improves each cycle"),
+            ("🗄️", "Data Layer",       "Open Catalyst Project · Materials Project · BRENDA enzyme databases"),
+            ("🤖", "AI Generator",     "Rule-based doping & surface mutation generates novel candidates"),
+            ("📈", "ML Predictor",     "Random Forest on element-property features with uncertainty quantification"),
+            ("⚡", "Energy Simulator", "BEP-scaled reaction-coordinate diagrams: activation barriers & ΔG per catalyst"),
+            ("🔄", "Feedback Loop",    "SQLite experiment log feeds active learning → model improves each cycle"),
         ]:
             st.markdown(f"""
             <div class="feature-card" style="margin-bottom:0.75rem;">
@@ -497,6 +498,35 @@ elif page == "⚗️ Catalyst Co-Pilot":
         with st.expander("Full properties"):
             st.json({k: v for k, v in dive_cat.items() if k != "composition"})
 
+        # Step 6 — Reaction Energy Profile
+        st.divider()
+        st.markdown("""
+        <div class="apple-card">
+            <div class="step-badge">6</div>
+            <div class="step-label">Step 6</div>
+            <div class="step-title">Reaction Energy Profile</div>
+        </div>""", unsafe_allow_html=True)
+
+        _ep = cm.get_energy_profile_data(chosen_key, dive_cat)
+        if _ep:
+            _ints     = _ep["intermediates"]
+            _ts       = _ep["ts_energies"]
+            _barriers = [_ts[i] - _ints[i][1] for i in range(len(_ints) - 1)]
+            _rls_idx  = int(np.argmax(_barriers))
+            _Ea_rls   = _barriers[_rls_idx]
+            _dG       = _ints[-1][1] - _ints[0][1]
+            _rls_step = f"{_ints[_rls_idx][0]} → {_ints[_rls_idx + 1][0]}"
+            ep1, ep2, ep3, ep4 = st.columns(4)
+            ep1.metric("Activation Energy (Eₐ)", f"{_Ea_rls:.2f} eV")
+            ep2.metric("Overall ΔG",              f"{_dG:+.2f} eV")
+            ep3.metric("Elementary Steps",         len(_ints) - 1)
+            ep4.metric("Rate-Limiting Step",
+                       _rls_step[:26] + ("…" if len(_rls_step) > 26 else ""))
+        st.plotly_chart(
+            cm.plot_reaction_energy_profile(chosen_key, dive_cat),
+            use_container_width=True,
+        )
+
         # Active learning suggestions
         al_picks = fb.get_al_suggestions(variants, top_k=3)
         if al_picks:
@@ -521,7 +551,8 @@ elif page == "⚗️ Catalyst Co-Pilot":
                 </div>""", unsafe_allow_html=True)
 
         with st.expander("🔬 Log Experiment Result"):
-            exp_name = st.selectbox("Catalyst", [c["name"] for c in ranked], key="cat_exp_name")
+            exp_name_value = st.selectbox("Catalyst", [c["name"] for c in ranked], key="cat_exp_name")
+            exp_name = str(exp_name_value)
             exp_cat  = next(c for c in ranked if c["name"] == exp_name)
             col_p, col_a = st.columns(2)
             pred_val   = col_p.number_input("Predicted activity",   value=float(exp_cat["activity_score"]), step=0.01, format="%.3f", key="cat_pred")
