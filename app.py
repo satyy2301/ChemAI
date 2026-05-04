@@ -19,6 +19,9 @@ import numpy as np
 from modules import catalyst_module as cm
 from modules import bio_module as bm
 from modules import feedback as fb
+from modules import molecular_viewer as mv
+from modules import db_integration as db
+import streamlit.components.v1 as components
 
 # ─── One-time DB init ─────────────────────────────────────────────────────────
 fb.init_db()
@@ -319,6 +322,16 @@ with st.sidebar:
     st.divider()
     st.caption("Theme 4 · AI for Catalyst & Pathway Discovery")
     st.caption("Stack: Streamlit · scikit-learn · Plotly · SQLite")
+    st.divider()
+    with st.expander("🔑 Database API Keys"):
+        st.caption("Materials Project (optional)")
+        _sidebar_mp_key = st.text_input(
+            "MP API Key", type="password",
+            placeholder="Paste your key…",
+            help="Free key at materialsproject.org",
+            key="sidebar_mp_key",
+        )
+        st.caption("Catalysis Hub: no key needed")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -357,10 +370,12 @@ if page == "🏠 Overview":
     with col_a:
         st.markdown('<div class="section-header">System Architecture</div>', unsafe_allow_html=True)
         for icon, title, desc in [
-            ("🗄️", "Data Layer",    "Open Catalyst Project · Materials Project · BRENDA enzyme databases"),
-            ("🤖", "AI Generator",  "Rule-based doping & surface mutation generates novel candidates"),
-            ("📈", "ML Predictor",  "Random Forest on element-property features with uncertainty quantification"),
-            ("🔄", "Feedback Loop", "SQLite experiment log feeds active learning → model improves each cycle"),
+            ("🗄️", "Data Layer",       "Open Catalyst Project · Materials Project · BRENDA enzyme databases"),
+            ("🤖", "AI Generator",     "Rule-based doping & surface mutation generates novel candidates"),
+            ("📈", "ML Predictor",     "Random Forest on element-property features with uncertainty quantification"),
+            ("⚡", "Energy Simulator", "BEP-scaled reaction-coordinate diagrams: activation barriers & ΔG per catalyst"),
+            ("🔬", "3D Mol Viewer",   "Interactive catalyst surface slabs & metabolite 3D structures via 3Dmol.js"),
+            ("🔄", "Feedback Loop",   "SQLite experiment log feeds active learning → model improves each cycle"),
         ]:
             st.markdown(f"""
             <div class="feature-card" style="margin-bottom:0.75rem;">
@@ -436,6 +451,109 @@ elif page == "⚗️ Catalyst Co-Pilot":
         "Stability": c["stability_score"], "Selectivity": c["selectivity_score"], "Source": c["source"],
     } for c in known])
     st.dataframe(df_known, use_container_width=True, hide_index=True)
+
+    # ── Scientific Database Sources ────────────────────────────────────────────
+    st.markdown("""
+    <div class="apple-card" style="border-color:rgba(0,212,255,0.18);">
+        <div class="step-badge" style="background:linear-gradient(135deg,#00D4FF,#0A84FF);">DB</div>
+        <div class="step-label">LIVE DATA</div>
+        <div class="step-title">Scientific Database Sources</div>
+        <div style="font-size:0.78rem;color:var(--text-2);margin-top:4px;">
+            Catalysis Hub (DFT) &nbsp;·&nbsp; Materials Project &nbsp;·&nbsp; BRENDA Enzymes
+        </div>
+    </div>""", unsafe_allow_html=True)
+
+    _db_ref_cat = known[0] if known else {"composition": {"Pt": 1.0}}
+    _db_mp_key  = st.session_state.get("sidebar_mp_key", "")
+    _db_cache_key = f"db_results_{chosen_key}"
+
+    _db_col1, _db_col2 = st.columns([3, 1])
+    with _db_col2:
+        _db_fetch = st.button("Fetch from Databases", key=f"dbfetch_{chosen_key}",
+                              use_container_width=True)
+    with _db_col1:
+        st.caption("Retrieves real DFT reaction data and enzyme kinetics for the selected reaction. "
+                   "Catalysis Hub results are filtered to the dominant catalyst element.")
+
+    if _db_fetch:
+        with st.spinner("Querying Catalysis Hub · Materials Project · BRENDA…"):
+            st.session_state[_db_cache_key] = db.fetch_all(_db_ref_cat, chosen_key, _db_mp_key)
+
+    if _db_cache_key in st.session_state:
+        _db_res = st.session_state[_db_cache_key]
+        _ch_res = _db_res.get("catalysis_hub", {})
+        _mp_res = _db_res.get("materials_project", {})
+        _br_res = _db_res.get("brenda", {})
+
+        _tab_ch, _tab_mp, _tab_br = st.tabs([
+            "⚡ Catalysis Hub (DFT)",
+            "🔷 Materials Project",
+            "🧬 BRENDA Enzymes",
+        ])
+
+        with _tab_ch:
+            _ch_elem = _ch_res.get("element", "?")
+            if _ch_res.get("status") == "ok":
+                _ch_rows = _ch_res["rows"]
+                _df_ch = pd.DataFrame([{
+                    "Surface": r["surface"],
+                    "Facet": r["facet"],
+                    "Reactants (JSON)": r["reactants"][:45] + ("…" if len(r["reactants"]) > 45 else ""),
+                    "Products (JSON)": r["products"][:40] + ("…" if len(r["products"]) > 40 else ""),
+                    "ΔE (eV)": round(r["reaction_energy_ev"], 4) if r["reaction_energy_ev"] is not None else "—",
+                    "Eₐ (eV)": round(r["activation_energy_ev"], 4) if r["activation_energy_ev"] is not None else "—",
+                    "DFT Functional": r["dft_functional"],
+                } for r in _ch_rows])
+                st.markdown(f"**{len(_ch_rows)} DFT entries** for `{_ch_elem}` surface — source: "
+                            "[Catalysis Hub](https://www.catalysis-hub.org/)")
+                st.dataframe(_df_ch, use_container_width=True, hide_index=True)
+            elif _ch_res.get("status") == "no_data":
+                st.info(f"No DFT entries found for **{_ch_elem}** surface matching "
+                        f"**{chosen_label}** reaction species in Catalysis Hub.")
+            else:
+                st.error(f"Catalysis Hub error: {_ch_res.get('error', 'unknown')}")
+
+        with _tab_mp:
+            if _mp_res.get("status") == "ok":
+                _df_mp = pd.DataFrame([{
+                    "Material ID": r["material_id"],
+                    "Formula": r["formula"],
+                    "Eₓ/atom (eV)": r["formation_energy_ev_atom"],
+                    "E above hull (eV)": r["energy_above_hull_ev"],
+                    "Band gap (eV)": r["band_gap_ev"],
+                    "Sites": r["n_sites"],
+                } for r in _mp_res["rows"]])
+                st.markdown("**Materials Project** stability & electronic structure — "
+                            "[materialsproject.org](https://materialsproject.org)")
+                st.dataframe(_df_mp, use_container_width=True, hide_index=True)
+            elif _mp_res.get("status") == "no_key":
+                st.info("Enter your free Materials Project API key in the sidebar "
+                        "(**Database API Keys**) to fetch formation energies and stability data.")
+            elif _mp_res.get("status") == "no_data":
+                st.info("No Materials Project entries found for this catalyst composition.")
+            else:
+                st.error(f"Materials Project error: {_mp_res.get('error', 'unknown')}")
+
+        with _tab_br:
+            if _br_res.get("status") == "ok":
+                _df_br = pd.DataFrame([{
+                    "Enzyme": r["enzyme"],
+                    "EC Number": r["ec_number"],
+                    "Substrate": r["substrate"],
+                    "Product": r["product"],
+                    "Kₘ (mM)": r.get("km_mm"),
+                    "kcat (s⁻¹)": r.get("kcat_s"),
+                    "Organism": r["organism"],
+                    "pH opt.": r["ph_optimum"],
+                    "T opt. (°C)": r["temp_optimum_c"],
+                } for r in _br_res["rows"]])
+                st.markdown("**BRENDA** enzyme kinetics — curated reference data "
+                            "([brenda-enzymes.org](https://www.brenda-enzymes.org/))")
+                st.dataframe(_df_br, use_container_width=True, hide_index=True)
+            else:
+                st.info("No curated BRENDA enzyme data for this reaction type. "
+                        "BRENDA data is most relevant for bio-catalytic reactions.")
+
     st.divider()
 
     # Step 3
@@ -497,6 +615,75 @@ elif page == "⚗️ Catalyst Co-Pilot":
         with st.expander("Full properties"):
             st.json({k: v for k, v in dive_cat.items() if k != "composition"})
 
+        # Step 6 — Reaction Energy Profile
+        st.divider()
+        st.markdown("""
+        <div class="apple-card">
+            <div class="step-badge">6</div>
+            <div class="step-label">Step 6</div>
+            <div class="step-title">Reaction Energy Profile</div>
+        </div>""", unsafe_allow_html=True)
+
+        _ep = cm.get_energy_profile_data(chosen_key, dive_cat)
+        if _ep:
+            _ints     = _ep["intermediates"]
+            _ts       = _ep["ts_energies"]
+            _barriers = [_ts[i] - _ints[i][1] for i in range(len(_ints) - 1)]
+            _rls_idx  = int(np.argmax(_barriers))
+            _Ea_rls   = _barriers[_rls_idx]
+            _dG       = _ints[-1][1] - _ints[0][1]
+            _rls_step = f"{_ints[_rls_idx][0]} → {_ints[_rls_idx + 1][0]}"
+            ep1, ep2, ep3, ep4 = st.columns(4)
+            ep1.metric("Activation Energy (Eₐ)", f"{_Ea_rls:.2f} eV")
+            ep2.metric("Overall ΔG",              f"{_dG:+.2f} eV")
+            ep3.metric("Elementary Steps",         len(_ints) - 1)
+            ep4.metric("Rate-Limiting Step",
+                       _rls_step[:26] + ("…" if len(_rls_step) > 26 else ""))
+        st.plotly_chart(
+            cm.plot_reaction_energy_profile(chosen_key, dive_cat),
+            use_container_width=True,
+        )
+
+        # Step 7 — 3D Catalyst Surface Viewer
+        st.divider()
+        st.markdown("""
+        <div class="apple-card">
+            <div class="step-badge">7</div>
+            <div class="step-label">Step 7</div>
+            <div class="step-title">3D Catalyst Surface Structure</div>
+        </div>""", unsafe_allow_html=True)
+
+        _comp  = dive_cat.get("composition", {})
+        _facet = dive_cat.get("surface_facet", "(111)")
+        _n_els = len(_comp)
+        sv1, sv2, sv3 = st.columns(3)
+        sv1.metric("Surface Facet",    _facet)
+        sv2.metric("Elements",         _n_els)
+        sv3.metric("Dominant Element", max(_comp, key=_comp.get) if _comp else "—")
+
+        _surf_col, _info_col = st.columns([3, 1])
+        with _surf_col:
+            _surf_html = mv.make_surface_viewer_html(dive_cat, height=400, width=640)
+            components.html(_surf_html, height=430, scrolling=False)
+        with _info_col:
+            st.markdown("""
+            <div class="apple-card" style="margin-top:0.5rem;">
+              <div class="step-label">LEGEND</div>
+              <div style="font-size:0.78rem;color:var(--text-2);line-height:2;">
+                Atom colours follow the<br>
+                <strong style="color:var(--text-1);">Jmol / CPK scheme</strong><br><br>
+                🟠 Cu &nbsp; ⚪ Pt/Pd<br>
+                🟤 Fe &nbsp; 🟢 Ni<br>
+                🔵 Co &nbsp; 🔵 Mo<br>
+                ⚫ C &nbsp;&nbsp; 🔴 O<br>
+                🔵 N &nbsp;&nbsp; 🟡 S<br><br>
+                Drag to <strong style="color:var(--text-1);">rotate</strong><br>
+                Scroll to <strong style="color:var(--text-1);">zoom</strong><br>
+                Surface: {}-layer FCC slab<br>
+                Grid: 5×5 atoms/layer
+              </div>
+            </div>""".format(4), unsafe_allow_html=True)
+
         # Active learning suggestions
         al_picks = fb.get_al_suggestions(variants, top_k=3)
         if al_picks:
@@ -521,7 +708,8 @@ elif page == "⚗️ Catalyst Co-Pilot":
                 </div>""", unsafe_allow_html=True)
 
         with st.expander("🔬 Log Experiment Result"):
-            exp_name = st.selectbox("Catalyst", [c["name"] for c in ranked], key="cat_exp_name")
+            exp_name_value = st.selectbox("Catalyst", [c["name"] for c in ranked], key="cat_exp_name")
+            exp_name = str(exp_name_value)
             exp_cat  = next(c for c in ranked if c["name"] == exp_name)
             col_p, col_a = st.columns(2)
             pred_val   = col_p.number_input("Predicted activity",   value=float(exp_cat["activity_score"]), step=0.01, format="%.3f", key="cat_pred")
@@ -636,6 +824,51 @@ elif page == "🧬 Bio Pathway Designer":
             df_steps = pd.DataFrame(chosen_path["steps"])
             df_steps["efficiency %"] = (df_steps["efficiency"] * 100).round(1)
             st.dataframe(df_steps[["from","to","enzyme","gene","ec","efficiency %"]], use_container_width=True, hide_index=True)
+
+        # ── 3D Metabolite Viewer ─────────────────────────────────────────────
+        st.markdown('<div class="section-header">🔬 Metabolite 3D Viewer</div>', unsafe_allow_html=True)
+
+        # Collect all unique node labels for this pathway
+        _step_nodes: list[str] = []
+        for _s in chosen_path.get("steps", []):
+            for _k in ("from", "to"):
+                _v = str(_s.get(_k, "")).strip()
+                if _v and _v not in _step_nodes:
+                    _step_nodes.append(_v)
+
+        if _step_nodes:
+            mol_col, view_col = st.columns([1, 3])
+            with mol_col:
+                st.markdown("""
+                <div class="apple-card" style="margin-bottom:0.6rem;">
+                  <div class="step-label">SELECT METABOLITE</div>
+                </div>""", unsafe_allow_html=True)
+                _chosen_node = st.selectbox(
+                    "Metabolite",
+                    _step_nodes,
+                    label_visibility="collapsed",
+                    key=f"mol3d_{chosen_path['id']}",
+                )
+                _mol_html, _mol_name = mv.make_molecule_viewer_html(
+                    _chosen_node, height=380, width=440,
+                )
+                st.markdown(f"""
+                <div class="apple-card" style="margin-top:0.5rem;">
+                  <div class="step-label">STRUCTURE INFO</div>
+                  <div style="font-size:0.82rem;color:var(--text-1);font-weight:600;
+                              margin-bottom:4px;">{_mol_name}</div>
+                  <div style="font-size:0.75rem;color:var(--text-2);line-height:1.6;">
+                    Pathway node:<br>
+                    <strong style="color:var(--cyan);">{_chosen_node}</strong><br><br>
+                    🔵 N &nbsp; ⚫ C &nbsp; 🔴 O<br>
+                    🟡 S &nbsp; 🟠 P &nbsp; ⚪ H<br><br>
+                    Drag to rotate · Scroll to zoom
+                  </div>
+                </div>""", unsafe_allow_html=True)
+            with view_col:
+                components.html(_mol_html, height=400, scrolling=False)
+        else:
+            st.info("No metabolite nodes found for this pathway.")
 
         # Bottleneck + Mutations
         col_b, col_m = st.columns(2)
