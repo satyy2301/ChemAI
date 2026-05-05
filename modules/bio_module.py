@@ -247,9 +247,9 @@ def get_bottleneck_step(pathway: dict) -> dict | None:
         if step["enzyme"].split(" ")[0] in bottleneck or step["from"] in bottleneck:
             return step
     # fallback: lowest efficiency
-    steps = pathway.get("steps", [])
+    steps = [s for s in pathway.get("steps", []) if isinstance(s, dict)]
     if steps:
-        return min(steps, key=lambda s: s.get("efficiency", 1.0))
+        return min(steps, key=lambda s: float(s.get("efficiency", 1.0)))
     return None
 
 
@@ -423,6 +423,189 @@ def counterfactual_sensitivity(pathway: dict, scenario: dict) -> list:
         })
 
     return sorted(rows, key=lambda x: abs(x["delta_yield"]), reverse=True)
+
+
+# ─── Flux Balance Analysis ───────────────────────────────────────────────────
+
+def run_fba(pathway: dict, scenario: dict | None = None) -> dict:
+    """Maximize product flux via LP (scipy.optimize.linprog / HiGHS).
+
+    Variables  : v[0..n-1] = pathway step fluxes
+                 v[n]      = substrate exchange (input, fixed ≤ 1.0)
+                 v[n+1]    = product exchange (output, maximized)
+    Constraints: S·v = 0  (steady-state mass balance at each metabolite node)
+    Bounds     : 0 ≤ v_i ≤ efficiency_i  (capacity limit per step)
+    """
+    try:
+        from scipy.optimize import linprog
+    except ImportError:
+        return {"status": "scipy_missing", "fluxes": {}, "optimal_yield": 0.0, "reactions": []}
+
+    sc = scenario or {}
+    mutation_intensity = float(np.clip(float(sc.get("mutation_intensity", 0.4)), 0.0, 1.0))
+    oxygen_mode        = str(sc.get("oxygen_mode", "Microaerobic"))
+    temperature_c      = float(sc.get("temperature_c", 37.0))
+
+    steps = pathway.get("steps", [])
+    if not steps:
+        return {"status": "empty", "fluxes": {}, "optimal_yield": 0.0, "reactions": []}
+
+    bottleneck = get_bottleneck_step(pathway)
+    bottleneck_enzyme = (bottleneck or {}).get("enzyme", "")
+
+    # ── Metabolite ordering ────────────────────────────────────────────────────
+    metabolites: list[str] = []
+    for step in steps:
+        for key in ("from", "to"):
+            m = step[key]
+            if m not in metabolites:
+                metabolites.append(m)
+
+    substrate = metabolites[0]
+    product   = metabolites[-1]
+    n_steps   = len(steps)
+    n_mets    = len(metabolites)
+    n_vars    = n_steps + 2      # steps + substrate_in + product_out
+
+    # ── Stoichiometric matrix [n_mets × n_vars] ───────────────────────────────
+    S_mat = np.zeros((n_mets, n_vars))
+    for j, step in enumerate(steps):
+        frm, to_ = step["from"], step["to"]
+        if frm in metabolites:
+            S_mat[metabolites.index(frm), j] = -1.0
+        if to_ in metabolites:
+            S_mat[metabolites.index(to_),  j] = +1.0
+
+    # substrate exchange produces substrate (index n_steps)
+    S_mat[metabolites.index(substrate), n_steps]     = +1.0
+    # product exchange consumes product (index n_steps+1)
+    S_mat[metabolites.index(product),   n_steps + 1] = -1.0
+
+    # ── Bounds ────────────────────────────────────────────────────────────────
+    temp_factor = float(max(0.60, 1.0 - abs(temperature_c - 37.0) * 0.012))
+    bounds: list[tuple[float, float | None]] = []
+    for j, step in enumerate(steps):
+        eff = float(step.get("efficiency", 0.85)) * temp_factor
+        # Oxygen penalty for aerobic enzymes in anaerobic mode
+        if oxygen_mode == "Anaerobic":
+            enzyme_lc = step.get("enzyme", "").lower()
+            if any(k in enzyme_lc for k in ("oxidase", "oxygenase", "synthase (fas)", "carboxylase")):
+                eff *= 0.80
+        # Mutation-driven improvement of the bottleneck step
+        if bottleneck_enzyme and step.get("enzyme", "") == bottleneck_enzyme:
+            eff = min(0.99, eff + mutation_intensity * 0.18)
+        bounds.append((0.0, float(np.clip(eff, 0.05, 0.99))))
+
+    bounds.append((0.0, 1.0))   # substrate_in ∈ [0, 1]
+    bounds.append((0.0, None))  # product_out  ∈ [0, ∞)
+
+    # ── Objective: maximise product_out ────────────────────────────────────────
+    c = np.zeros(n_vars)
+    c[n_steps + 1] = -1.0  # linprog minimises → negate
+
+    result = linprog(c, A_eq=S_mat, b_eq=np.zeros(n_mets), bounds=bounds, method="highs")
+
+    rxn_labels = [
+        f"{s['from'][:22]} → {s['to'][:22]}"
+        for s in steps
+    ]
+
+    if result.status == 0:
+        fluxes = {rxn_labels[j]: float(result.x[j]) for j in range(n_steps)}
+        eff_bounds = [float(b[1]) for b in bounds[:n_steps] if b[1] is not None]
+        # Identify the step carrying lowest flux (= flux-limiting)
+        limiting_idx = int(np.argmin(result.x[:n_steps]))
+        return {
+            "status": "optimal",
+            "fluxes": fluxes,
+            "optimal_yield":  float(result.x[n_steps + 1]),
+            "substrate_in":   float(result.x[n_steps]),
+            "reactions":      rxn_labels,
+            "metabolites":    metabolites,
+            "limiting_step":  rxn_labels[limiting_idx],
+            "efficiency_bounds": eff_bounds,
+        }
+
+    # Fallback: proportional approximation
+    effs = [float(s.get("efficiency", 0.85)) for s in steps]
+    fluxes_fb = {rxn_labels[j]: effs[j] for j in range(n_steps)}
+    limiting_idx_fb = int(np.argmin(effs))
+    return {
+        "status": "approximate",
+        "fluxes": fluxes_fb,
+        "optimal_yield":  float(min(effs)),
+        "substrate_in":   1.0,
+        "reactions":      rxn_labels,
+        "metabolites":    metabolites,
+        "limiting_step":  rxn_labels[limiting_idx_fb],
+        "efficiency_bounds": effs,
+    }
+
+
+def plot_fba_fluxes(fba_result: dict) -> go.Figure:
+    """Horizontal bar chart of FBA-optimised flux distribution."""
+    fluxes   = fba_result.get("fluxes", {})
+    limiting = fba_result.get("limiting_step", "")
+    eff_bnd  = fba_result.get("efficiency_bounds", [])
+
+    if not fluxes:
+        fig = go.Figure()
+        fig.update_layout(
+            title="No FBA results available",
+            plot_bgcolor="#0E1117", paper_bgcolor="#0E1117",
+            font=dict(color="#FAFAFA"), height=220,
+        )
+        return fig
+
+    reactions = list(fluxes.keys())
+    values    = [fluxes[r] for r in reactions]
+    n         = len(reactions)
+    colors    = ["#FF6B6B" if r == limiting else "#00D4FF" for r in reactions]
+    capacity  = eff_bnd if len(eff_bnd) == n else [1.0] * n
+
+    fig = go.Figure()
+
+    # Capacity bars (background, faint)
+    fig.add_trace(go.Bar(
+        x=capacity, y=reactions,
+        orientation="h",
+        marker=dict(color="rgba(255,255,255,0.08)"),
+        name="Step capacity",
+        hovertemplate="%{y}<br>Capacity: %{x:.3f}<extra></extra>",
+    ))
+
+    # Actual flux bars
+    fig.add_trace(go.Bar(
+        x=values, y=reactions,
+        orientation="h",
+        marker_color=colors,
+        name="Optimised flux",
+        text=[f"{v:.3f}" for v in values],
+        textposition="auto",
+        textfont=dict(size=11),
+        hovertemplate="%{y}<br>Flux: %{x:.3f}<extra></extra>",
+    ))
+
+    opt_yield = fba_result.get("optimal_yield", 0.0)
+    status    = fba_result.get("status", "")
+    title_str = (
+        f"FBA Flux Distribution  |  Optimal yield: {opt_yield:.3f}"
+        + ("  (approx.)" if status == "approximate" else "")
+    )
+
+    fig.update_layout(
+        barmode="overlay",
+        title=title_str,
+        xaxis_title="Normalised flux",
+        xaxis=dict(range=[0, max(capacity + [0.1]) * 1.1]),
+        plot_bgcolor="#0E1117",
+        paper_bgcolor="#0E1117",
+        font=dict(color="#FAFAFA"),
+        legend=dict(bgcolor="#1A1A2E", bordercolor="#333"),
+        height=max(280, n * 52 + 80),
+        margin=dict(l=20, r=20, t=50, b=40),
+    )
+    return fig
 
 
 # ─── Summary table ────────────────────────────────────────────────────────────

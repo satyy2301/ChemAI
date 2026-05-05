@@ -677,6 +677,14 @@ _NODE_MAP: dict[str, str] = {
     # PDO
     "3-hydroxypropionaldehyde":     "3-Hydroxypropionaldehyde",
     "1,3-propanediol":              "1,3-Propanediol",
+    # Lignocellulosic substrates (proxy: Glucose for viewer)
+    "cellulose":                    "Glucose",
+    "cellobiose":                   "Glucose",
+    "lignocellulose / switchgrass": "Glucose",
+    "lignocellulose":               "Glucose",
+    "switchgrass":                  "Glucose",
+    "switchgrass biomass":          "Glucose",
+    "xylose / glucose":             "Xylose",
 }
 
 
@@ -874,3 +882,150 @@ def make_molecule_viewer_html(node_label: str, **kwargs) -> tuple[str, str]:
         height=kwargs.get("height", 400),
     )
     return html, mol_name
+
+
+# ─── Protein structure viewer ─────────────────────────────────────────────────
+
+_PROTEIN_DB: dict[str, dict] = {
+    "2.7.1.1":  {"pdb": "1HKG", "name": "Hexokinase",                "chain": "A", "active_resi": [169, 171, 204, 244, 255]},
+    "2.7.1.11": {"pdb": "4XYM", "name": "Phosphofructokinase",        "chain": "A", "active_resi": [72, 156, 189, 214]},
+    "2.7.1.40": {"pdb": "1A49", "name": "Pyruvate Kinase",            "chain": "A", "active_resi": [72, 75, 257, 266]},
+    "4.1.1.1":  {"pdb": "2VK8", "name": "Pyruvate Decarboxylase",     "chain": "A", "active_resi": [113, 290, 391, 441]},
+    "1.1.1.1":  {"pdb": "2OHX", "name": "Alcohol Dehydrogenase",      "chain": "A", "active_resi": [36, 46, 57, 93, 178]},
+    "4.1.1.72": {"pdb": "2VBF", "name": "2-Ketoacid Decarboxylase",   "chain": "A", "active_resi": [385, 434, 461, 542]},
+    "2.2.1.6":  {"pdb": "1YBH", "name": "Acetolactate Synthase",      "chain": "A", "active_resi": [121, 217, 353, 432]},
+    "4.2.3.47": {"pdb": "3SDX", "name": "Farnesene Synthase",         "chain": "A", "active_resi": [171, 174, 255, 302]},
+    "5.3.1.5":  {"pdb": "1XIS", "name": "Xylose Isomerase",           "chain": "A", "active_resi": [180, 220, 254, 296, 308]},
+    "1.1.1.34": {"pdb": "1DQA", "name": "HMG-CoA Reductase",          "chain": "A", "active_resi": [436, 462, 590, 661]},
+    "3.2.1.91": {"pdb": "1EW9", "name": "Cel7A Cellulase",            "chain": "A", "active_resi": [169, 226, 373, 395, 397]},
+    "3.2.1.21": {"pdb": "1GNX", "name": "Beta-Glucosidase",           "chain": "A", "active_resi": [166, 358, 401, 411]},
+    "4.2.1.9":  {"pdb": "1PRP", "name": "Dihydroxy Acid Dehydratase", "chain": "A", "active_resi": [56, 492, 514]},
+    "2.3.1.9":  {"pdb": "1DLV", "name": "Beta-Ketothiolase",          "chain": "A", "active_resi": [89, 378, 391]},
+    "2.5.1.1":  {"pdb": "1ZW5", "name": "Farnesyl-PP Synthase",       "chain": "A", "active_resi": [81, 107, 119, 243]},
+    "1.1.1.86": {"pdb": "1YRL", "name": "Ketol-acid Reductoisomerase","chain": "A", "active_resi": [46, 110, 192, 198]},
+    "2.7.1.17": {"pdb": "1RKD", "name": "Xylulokinase",               "chain": "A", "active_resi": [13, 15, 233, 292]},
+    "multi":    {"pdb": "1A49", "name": "Multi-enzyme Complex",        "chain": "A", "active_resi": [72, 75, 257]},
+}
+
+_MUTATION_KEYWORDS: list[tuple[str, float, float]] = [
+    # (keyword, expected_gain, risk_delta)
+    ("directed evolution",   0.14, 0.18),
+    ("error-prone pcr",      0.12, 0.20),
+    ("overexpress",          0.08, 0.10),
+    ("delete",               0.06, 0.12),
+    ("engineer cofactor",    0.07, 0.14),
+    ("adaptive",             0.05, 0.08),
+    ("codon-optim",          0.04, 0.05),
+    ("transporter",          0.05, 0.08),
+    ("downregulate",         0.05, 0.09),
+    ("mutant",               0.09, 0.15),
+]
+
+
+def _estimate_mutation_effect(suggestions: list[str]) -> dict:
+    """Estimate cumulative yield gain and risk from a list of mutation/engineering suggestions."""
+    total_gain = 0.0
+    total_risk = 0.0
+    matched: list[str] = []
+    for sug in suggestions:
+        low = sug.lower()
+        for keyword, gain, risk in _MUTATION_KEYWORDS:
+            if keyword in low:
+                total_gain += gain
+                total_risk += risk
+                matched.append(keyword)
+                break
+        else:
+            total_gain += 0.03
+            total_risk += 0.06
+
+    # Diminishing returns for many interventions
+    n = max(1, len(suggestions))
+    total_gain = float(min(0.55, total_gain * (1.0 - 0.08 * (n - 1))))
+    total_risk = float(min(0.90, total_risk / n))
+
+    return {
+        "estimated_gain": round(total_gain, 3),
+        "estimated_risk": round(total_risk, 3),
+        "interventions_parsed": matched,
+    }
+
+
+def make_protein_viewer_html(
+    enzyme_name: str,
+    ec: str,
+    mutation_suggestions: list[str] | None = None,
+    *,
+    width: int = 640,
+    height: int = 440,
+    bg_color: str = "0x0e1117",
+) -> tuple[str, dict]:
+    """Return (html_str, effect_dict) for a bottleneck enzyme protein viewer.
+
+    Loads the protein from RCSB PDB via 3Dmol.js CDN.
+    Active-site residues are highlighted in orange stick representation.
+    """
+    suggestions = mutation_suggestions or []
+    effect = _estimate_mutation_effect(suggestions)
+
+    # Resolve PDB entry (try EC exact match, then strip to main class, then fallback)
+    entry = (
+        _PROTEIN_DB.get(ec)
+        or _PROTEIN_DB.get(ec.split(".")[0] + "." + ec.split(".")[1] if ec.count(".") >= 1 else "")
+        or {"pdb": "1A49", "name": enzyme_name or "Enzyme", "chain": "A", "active_resi": [72, 75]}
+    )
+
+    pdb_id   = entry["pdb"]
+    prot_name = entry.get("name", enzyme_name)
+    chain    = entry.get("chain", "A")
+    resi_list = entry.get("active_resi", [])
+
+    # Build JS array for active-site residue selection
+    resi_js = str(resi_list)  # e.g. [113, 290, 391, 441]
+
+    uid = uuid.uuid4().hex[:8]
+    label_text = f"{prot_name} (PDB: {pdb_id}) — Active site residues: {', '.join(str(r) for r in resi_list[:6])}"
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+<script src="{_3DMOL_CDN}"></script>
+<style>
+  body{{margin:0;padding:0;background:#{bg_color.replace("0x","")};}}
+  #p{uid}{{width:{width}px;height:{height}px;position:relative;}}
+  #lbl{uid}{{color:#86868b;font:10px/1.4 Inter,sans-serif;
+              text-align:center;padding:4px 0 0;max-width:{width}px;}}
+</style>
+</head>
+<body>
+<div id="p{uid}"></div>
+<div id="lbl{uid}">{label_text}</div>
+<script>
+(function(){{
+  var viewer = $3Dmol.createViewer(
+    document.getElementById("p{uid}"),
+    {{backgroundColor:"#{bg_color.replace("0x","")}"}}
+  );
+  $3Dmol.download("pdb:{pdb_id}", viewer, {{}}, function() {{
+    // Full structure: cartoon coloured by chain
+    viewer.setStyle({{}}, {{cartoon: {{color: "spectrum", opacity: 0.88}}}});
+    // Active-site residues: orange sticks
+    var activeSel = {{resi: {resi_js}, chain: "{chain}"}};
+    viewer.addStyle(activeSel, {{stick: {{colorscheme: "orangeCarbon", radius: 0.28}}}});
+    viewer.addStyle(activeSel, {{sphere: {{colorscheme: "orangeCarbon", scale: 0.22}}}});
+    // Label the active site
+    viewer.addLabel("Active site", {{
+      position: {{resi: {resi_list[0] if resi_list else 100}, chain: "{chain}"}},
+      fontSize: 11, fontColor: "orange", backgroundColor: "black",
+      backgroundOpacity: 0.5, borderThickness: 1,
+    }});
+    viewer.zoomTo(activeSel);
+    viewer.spin("y", 0.3);
+    viewer.render();
+  }});
+}})();
+</script>
+</body>
+</html>"""
+
+    return html, effect
