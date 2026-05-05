@@ -594,7 +594,7 @@ elif page == "⚗️ Catalyst Co-Pilot":
             "doping":      "Doping (add element)",
             "surface":     "Surface (facet swap)",
             "generative":  "Generative AI (GMM latent space)",
-        }.get(s, s),
+        }.get(s) or s,
     )
     with col3: n_gen = st.slider("Variants", 3, 8, 5)
     if strategy == "generative":
@@ -672,7 +672,7 @@ elif page == "⚗️ Catalyst Co-Pilot":
             help="Property-tagged SDF — compatible with RDKit / OpenBabel / ChemDraw",
         )
         with st.expander("📋 Lab Report Preview  (download as .txt)"):
-            _report_txt = fb.generate_lab_report(ranked, chosen_label, top_n=_export_n)
+            _report_txt = fb.generate_lab_report(ranked, chosen_label or "", top_n=_export_n)
             st.code(_report_txt, language=None)
             st.download_button(
                 "⬇️ Download Lab Report",
@@ -803,7 +803,7 @@ elif page == "⚗️ Catalyst Co-Pilot":
             col_prov, col_qual = st.columns(2)
             cat_provenance = col_prov.selectbox(
                 "Data source", list(_prov_labels.keys()),
-                format_func=lambda x: _prov_labels.get(x, x), key="cat_provenance",
+                format_func=lambda x: _prov_labels.get(x) or x, key="cat_provenance",
             )
             cat_quality = col_qual.selectbox("Data quality", ["good", "uncertain", "outlier"], key="cat_quality")
             if st.button("✅ Submit Experiment", key="cat_submit"):
@@ -1104,7 +1104,7 @@ elif page == "🧬 Bio Pathway Designer":
             col_prov2, col_qual2 = st.columns(2)
             bio_provenance = col_prov2.selectbox(
                 "Data source", list(_bio_prov_labels.keys()),
-                format_func=lambda x: _bio_prov_labels.get(x, x), key="bio_provenance",
+                format_func=lambda x: _bio_prov_labels.get(x) or x, key="bio_provenance",
             )
             bio_quality = col_qual2.selectbox("Data quality", ["good", "uncertain", "outlier"], key="bio_quality")
             if st.button("✅ Submit Bio Experiment"):
