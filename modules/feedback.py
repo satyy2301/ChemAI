@@ -16,21 +16,43 @@ DB_PATH = Path(__file__).parent.parent / "data" / "experiments.db"
 
 # ─── DB initialisation ────────────────────────────────────────────────────────
 
+def _migrate_db():
+    """Add provenance/collaboration columns to experiments table for backward compat."""
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    for col, defn in [
+        ("user",              "TEXT DEFAULT 'anonymous'"),
+        ("version_tag",       "TEXT DEFAULT 'v1'"),
+        ("data_quality",      "TEXT DEFAULT 'good'"),
+        ("source_provenance", "TEXT DEFAULT 'internal_experiment'"),
+    ]:
+        try:
+            cur.execute(f"ALTER TABLE experiments ADD COLUMN {col} {defn}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+    con.commit()
+    con.close()
+
+
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS experiments (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp   TEXT    NOT NULL,
-            exp_type    TEXT    NOT NULL,   -- 'catalyst' | 'bio'
-            name        TEXT    NOT NULL,
-            pred_value  REAL,               -- model prediction
-            actual_value REAL,              -- what the lab measured
-            metric      TEXT,               -- 'activity' | 'yield' | 'stability'
-            notes       TEXT,
-            composition TEXT                -- JSON string (optional)
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp        TEXT    NOT NULL,
+            exp_type         TEXT    NOT NULL,
+            name             TEXT    NOT NULL,
+            pred_value       REAL,
+            actual_value     REAL,
+            metric           TEXT,
+            notes            TEXT,
+            composition      TEXT,
+            user             TEXT    DEFAULT 'anonymous',
+            version_tag      TEXT    DEFAULT 'v1',
+            data_quality     TEXT    DEFAULT 'good',
+            source_provenance TEXT   DEFAULT 'internal_experiment'
         )
     """)
     cur.execute("""
@@ -71,8 +93,20 @@ def init_db():
             notes           TEXT
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS annotations (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp   TEXT    NOT NULL,
+            user        TEXT    NOT NULL,
+            exp_id      INTEGER,
+            exp_type    TEXT,
+            target_name TEXT,
+            text        TEXT    NOT NULL
+        )
+    """)
     con.commit()
     con.close()
+    _migrate_db()
     _seed_demo_data()
 
 
@@ -86,17 +120,17 @@ def _seed_demo_data():
         return  # Already seeded
 
     seed_rows = [
-        # (timestamp, exp_type, name, pred, actual, metric, notes, comp)
-        ("2026-04-10 09:00", "catalyst", "Cu/ZnO/Al₂O₃",    0.78, 0.76, "activity",  "Standard run, baseline.", "{}"),
-        ("2026-04-11 11:30", "catalyst", "Pd/In₂O₃",         0.85, 0.83, "activity",  "Good agreement.", "{}"),
-        ("2026-04-12 14:00", "catalyst", "In₂O₃/ZrO₂",       0.71, 0.74, "activity",  "Slightly under-predicted.", "{}"),
-        ("2026-04-13 10:00", "catalyst", "Cu-Zn-Ga/Al₂O₃",   0.80, 0.77, "activity",  "Ga doping confirmed.", "{}"),
-        ("2026-04-14 15:00", "bio",      "Glucose → Ethanol", 0.51, 0.49, "yield",     "Close to theoretical.", "{}"),
-        ("2026-04-15 09:30", "bio",      "Glucose → Isobutanol", 0.41, 0.37, "yield",  "Lower than predicted.", "{}"),
-        ("2026-04-16 11:00", "bio",      "Fatty Acids → Biodiesel", 0.90, 0.88, "yield", "Good result.", "{}"),
-        ("2026-04-17 14:30", "catalyst", "CoP/Carbon",        0.83, 0.80, "activity",  "HER test.", "{}"),
-        ("2026-04-18 10:00", "catalyst", "Ni-Fe/CeO₂",        0.84, 0.86, "activity",  "Slightly over-performed.", "{}"),
-        ("2026-04-20 16:00", "bio",      "Glucose → Lactic Acid", 0.88, 0.91, "yield", "Exceeded prediction.", "{}"),
+        # (ts, exp_type, name, pred, actual, metric, notes, comp, user, vtag, quality, provenance)
+        ("2026-04-10 09:00", "catalyst", "Cu/ZnO/Al₂O₃",        0.78, 0.76, "activity", "Standard run, baseline.",   "{}", "alice", "v1", "good",      "internal_experiment"),
+        ("2026-04-11 11:30", "catalyst", "Pd/In₂O₃",             0.85, 0.83, "activity", "Good agreement.",           "{}", "bob",   "v1", "good",      "published_paper"),
+        ("2026-04-12 14:00", "catalyst", "In₂O₃/ZrO₂",           0.71, 0.74, "activity", "Slightly under-predicted.", "{}", "alice", "v1", "good",      "internal_experiment"),
+        ("2026-04-13 10:00", "catalyst", "Cu-Zn-Ga/Al₂O₃",       0.80, 0.77, "activity", "Ga doping confirmed.",      "{}", "carol", "v1", "good",      "screening"),
+        ("2026-04-14 15:00", "bio",      "Glucose → Ethanol",     0.51, 0.49, "yield",    "Close to theoretical.",     "{}", "bob",   "v1", "good",      "published_paper"),
+        ("2026-04-15 09:30", "bio",      "Glucose → Isobutanol",  0.41, 0.37, "yield",    "Lower than predicted.",     "{}", "carol", "v1", "uncertain", "internal_experiment"),
+        ("2026-04-16 11:00", "bio",      "Fatty Acids → Biodiesel",0.90,0.88, "yield",    "Good result.",              "{}", "alice", "v1", "good",      "db_retrieved"),
+        ("2026-04-17 14:30", "catalyst", "CoP/Carbon",            0.83, 0.80, "activity", "HER test.",                 "{}", "bob",   "v1", "good",      "screening"),
+        ("2026-04-18 10:00", "catalyst", "Ni-Fe/CeO₂",            0.84, 0.86, "activity", "Slightly over-performed.",  "{}", "carol", "v1", "uncertain", "internal_experiment"),
+        ("2026-04-20 16:00", "bio",      "Glucose → Lactic Acid", 0.88, 0.91, "yield",    "Exceeded prediction.",      "{}", "alice", "v2", "good",      "published_paper"),
     ]
     seed_model_rows = [
         ("2026-04-12 00:00", "catalyst", 0.042, 0.058, 4),
@@ -107,11 +141,24 @@ def _seed_demo_data():
     ]
     cur.executemany(
         "INSERT INTO experiments (timestamp, exp_type, name, pred_value, actual_value,"
-        " metric, notes, composition) VALUES (?,?,?,?,?,?,?,?)", seed_rows
+        " metric, notes, composition, user, version_tag, data_quality, source_provenance)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", seed_rows
     )
     cur.executemany(
         "INSERT INTO model_versions (timestamp, exp_type, mae, rmse, n_samples)"
         " VALUES (?,?,?,?,?)", seed_model_rows
+    )
+    seed_annotations = [
+        ("2026-04-10 10:00", "alice", 1, "catalyst", "Cu/ZnO/Al₂O₃",        "Baseline confirmed. Good starting point for Ga/In doping studies."),
+        ("2026-04-11 12:00", "bob",   2, "catalyst", "Pd/In₂O₃",             "Matches Liu et al. 2024 within 2.5%. Paper data source verified."),
+        ("2026-04-13 11:00", "carol", 4, "catalyst", "Cu-Zn-Ga/Al₂O₃",      "Ga at 5 mol% optimal. Higher concentrations reduce long-term stability."),
+        ("2026-04-15 10:00", "alice", 6, "bio",      "Glucose → Isobutanol", "Suspected product inhibition at high titers. Flagged as uncertain."),
+        ("2026-04-18 11:00", "bob",   9, "catalyst", "Ni-Fe/CeO₂",           "Over-performance likely due to Fe surface segregation. Revisit prep."),
+        ("2026-04-20 17:00", "carol",10, "bio",      "Glucose → Lactic Acid","Exceeded prediction after pH opt. Promoting to v2 for replication."),
+    ]
+    cur.executemany(
+        "INSERT INTO annotations (timestamp, user, exp_id, exp_type, target_name, text)"
+        " VALUES (?,?,?,?,?,?)", seed_annotations
     )
     con.commit()
     con.close()
@@ -121,16 +168,28 @@ def _seed_demo_data():
 
 def log_experiment(exp_type: str, name: str, pred_value: float,
                    actual_value: float, metric: str,
-                   notes: str = "", composition: dict | None = None):
+                   notes: str = "", composition: dict | None = None,
+                   user: str = "anonymous", version_tag: str = "",
+                   data_quality: str = "good",
+                   source_provenance: str = "internal_experiment"):
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
+    if not version_tag:
+        cur.execute(
+            "SELECT COUNT(*) FROM experiments WHERE name=? AND exp_type=?",
+            (name, exp_type),
+        )
+        n = cur.fetchone()[0]
+        version_tag = f"v{n + 1}"
     cur.execute(
         "INSERT INTO experiments (timestamp, exp_type, name, pred_value, actual_value,"
-        " metric, notes, composition) VALUES (?,?,?,?,?,?,?,?)",
+        " metric, notes, composition, user, version_tag, data_quality, source_provenance)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             datetime.now().strftime("%Y-%m-%d %H:%M"),
             exp_type, name, pred_value, actual_value, metric,
             notes, json.dumps(composition or {}),
+            user, version_tag, data_quality, source_provenance,
         )
     )
     con.commit()
@@ -416,3 +475,296 @@ def plot_experiment_timeline(exp_type: str | None = None) -> go.Figure:
         height=380,
     )
     return fig
+
+
+# ─── Collaboration & provenance ───────────────────────────────────────────────
+
+def add_annotation(user: str, text: str, exp_id: int | None = None,
+                   exp_type: str = "", target_name: str = ""):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute(
+        "INSERT INTO annotations (timestamp, user, exp_id, exp_type, target_name, text)"
+        " VALUES (?,?,?,?,?,?)",
+        (datetime.now().strftime("%Y-%m-%d %H:%M"), user, exp_id, exp_type, target_name, text),
+    )
+    con.commit()
+    con.close()
+
+
+def get_annotations(exp_id: int | None = None, exp_type: str | None = None) -> pd.DataFrame:
+    con = sqlite3.connect(DB_PATH)
+    q = "SELECT * FROM annotations"
+    conditions, params = [], []
+    if exp_id is not None:
+        conditions.append("exp_id = ?")
+        params.append(exp_id)
+    if exp_type:
+        conditions.append("exp_type = ?")
+        params.append(exp_type)
+    if conditions:
+        q += " WHERE " + " AND ".join(conditions)
+    q += " ORDER BY timestamp DESC"
+    df = pd.read_sql_query(q, con, params=params)
+    con.close()
+    return df
+
+
+def get_user_activity() -> pd.DataFrame:
+    con = sqlite3.connect(DB_PATH)
+    df = pd.read_sql_query(
+        "SELECT user, COUNT(*) as experiments, MAX(timestamp) as last_active"
+        " FROM experiments GROUP BY user ORDER BY experiments DESC",
+        con,
+    )
+    con.close()
+    return df
+
+
+def get_provenance_summary() -> pd.DataFrame:
+    con = sqlite3.connect(DB_PATH)
+    df = pd.read_sql_query(
+        "SELECT source_provenance, data_quality, COUNT(*) as count"
+        " FROM experiments GROUP BY source_provenance, data_quality",
+        con,
+    )
+    con.close()
+    return df
+
+
+def get_experiment_history(name: str, exp_type: str) -> pd.DataFrame:
+    con = sqlite3.connect(DB_PATH)
+    df = pd.read_sql_query(
+        "SELECT id, timestamp, user, version_tag, pred_value, actual_value,"
+        " data_quality, source_provenance, notes"
+        " FROM experiments WHERE name=? AND exp_type=? ORDER BY timestamp ASC",
+        con, params=(name, exp_type),
+    )
+    con.close()
+    return df
+
+
+def plot_provenance_chart() -> go.Figure:
+    df = get_provenance_summary()
+    if df.empty:
+        fig = go.Figure()
+        fig.update_layout(title="No provenance data yet", paper_bgcolor="#0E1117",
+                          font=dict(color="#FAFAFA"))
+        return fig
+    label_map = {
+        "internal_experiment": "Internal Experiment",
+        "published_paper":     "Published Paper",
+        "screening":           "Screening Campaign",
+        "db_retrieved":        "DB Retrieved",
+        "ai_simulation":       "AI Simulation",
+    }
+    quality_colors = {"good": "#30D158", "uncertain": "#FF9F0A", "outlier": "#FF453A"}
+    fig = go.Figure()
+    for quality in ["good", "uncertain", "outlier"]:
+        sub = df[df["data_quality"] == quality]
+        if sub.empty:
+            continue
+        fig.add_trace(go.Bar(
+            x=sub["source_provenance"].map(lambda x: label_map.get(x, x)),
+            y=sub["count"],
+            name=quality.capitalize(),
+            marker_color=quality_colors.get(quality, "#888"),
+        ))
+    fig.update_layout(
+        title="Experiments by Source & Data Quality",
+        barmode="stack",
+        plot_bgcolor="#0E1117",
+        paper_bgcolor="#0E1117",
+        font=dict(color="#FAFAFA"),
+        legend=dict(bgcolor="#1A1A2E"),
+        height=340,
+        xaxis_tickangle=-15,
+    )
+    return fig
+
+
+# ─── Discrepancy flagging & automated hypothesis generation ───────────────────
+
+_HYPO_RULES: dict[tuple, str] = {
+    ("catalyst", "over",  "multi"):  (
+        "Multi-element dopant may segregate or form inactive phases under reaction conditions, "
+        "reducing active-site density below what static composition features predict."
+    ),
+    ("catalyst", "over",  "binary"): (
+        "Strong intermediate binding (catalyst poisoning) or surface reconstruction not captured "
+        "by weighted-average descriptors likely explains the over-prediction."
+    ),
+    ("catalyst", "under", "multi"):  (
+        "Multi-element synergy (ensemble/ligand effects among ≥3 components) not encoded in "
+        "single-element descriptors. Adding pairwise interaction features may close the gap."
+    ),
+    ("catalyst", "under", "binary"): (
+        "In-situ surface reconstruction or a reactive phase change may create additional active "
+        "sites beyond what the as-prepared composition suggests."
+    ),
+    ("bio", "over",  None): (
+        "Product inhibition or competing metabolic flux (overflow metabolism) may reduce actual "
+        "yield. Revisit kinetic constants and inhibition terms for these conditions."
+    ),
+    ("bio", "under", None): (
+        "Unexpected enzyme upregulation or cofactor availability under these conditions may boost "
+        "actual yield. Run flux-balance analysis at this operating point to confirm."
+    ),
+}
+
+
+def _generate_hypothesis(row: pd.Series) -> str:
+    exp_type  = str(row.get("exp_type", ""))
+    actual    = float(row.get("actual_value", 0) or 0)
+    pred      = float(row.get("pred_value",   0) or 0)
+    direction = "under" if actual > pred else "over"
+    abs_err   = abs(actual - pred)
+
+    comp: dict = {}
+    try:
+        comp = json.loads(row.get("composition", "{}") or "{}")
+    except Exception:
+        pass
+
+    n_el     = len(comp)
+    el_class = "multi" if n_el >= 3 else "binary"
+    dominant = max(comp, key=comp.get) if comp else "unknown"
+
+    key      = (exp_type, direction, el_class if exp_type == "catalyst" else None)
+    fallback = (exp_type, direction, None)
+    body     = _HYPO_RULES.get(key) or _HYPO_RULES.get(fallback, "Investigate potential model bias for this composition.")
+
+    return (
+        f"|Error| = {abs_err:.3f}  ({direction}-predicted).  "
+        f"Dominant element: {dominant}.  {body}"
+    )
+
+
+def flag_discrepancies(exp_type: str | None = None,
+                       threshold: float = 0.02) -> pd.DataFrame:
+    """
+    Return experiments where |actual − pred| > threshold, ordered worst-first.
+    Each row gets a 'flag' (OVER/UNDER-PREDICTED) and an AI-generated 'hypothesis'.
+    """
+    df = get_experiments(exp_type)
+    if df.empty:
+        return pd.DataFrame()
+
+    df = df.copy()
+    df["error"]     = (pd.to_numeric(df["actual_value"], errors="coerce")
+                       - pd.to_numeric(df["pred_value"],  errors="coerce"))
+    df["abs_error"] = df["error"].abs()
+
+    flagged = df[df["abs_error"] > threshold].copy()
+    if flagged.empty:
+        return flagged
+
+    flagged["flag"]       = flagged["error"].apply(
+        lambda e: "UNDER-PREDICTED" if e > 0 else "OVER-PREDICTED"
+    )
+    flagged["hypothesis"] = flagged.apply(_generate_hypothesis, axis=1)
+    return flagged.sort_values("abs_error", ascending=False).reset_index(drop=True)
+
+
+# ─── Export helpers ───────────────────────────────────────────────────────────
+
+def export_ranked_csv(candidates: list) -> bytes:
+    """Return ranked candidates as UTF-8 CSV bytes for st.download_button."""
+    rows = []
+    for i, c in enumerate(candidates):
+        unc = c.get("uncertainty", "")
+        rows.append({
+            "Rank":              i + 1,
+            "Name":              c.get("name", ""),
+            "Formula":           c.get("formula", ""),
+            "Composite Score":   round(c.get("composite_score",   0), 4),
+            "Activity Score":    round(c.get("activity_score",    0), 4),
+            "Stability Score":   round(c.get("stability_score",   0), 4),
+            "Selectivity Score": round(c.get("selectivity_score", 0), 4),
+            "Adsorption E (eV)": round(c.get("adsorption_energy", 0), 4),
+            "Uncertainty":       round(unc, 4) if isinstance(unc, float) else unc,
+            "Surface Facet":     c.get("surface_facet", ""),
+            "Source":            c.get("source", ""),
+            "Reaction":          c.get("reaction", ""),
+        })
+    return pd.DataFrame(rows).to_csv(index=False).encode("utf-8")
+
+
+def export_ranked_json(candidates: list) -> bytes:
+    """Return ranked candidates as UTF-8 JSON bytes."""
+    safe = []
+    for i, c in enumerate(candidates):
+        row = {k: v for k, v in c.items() if k != "composition"}
+        row["rank"] = i + 1
+        safe.append(row)
+    return json.dumps(safe, indent=2).encode("utf-8")
+
+
+def generate_candidates_sdf(candidates: list) -> str:
+    """
+    Generate a property-only SDF (V2000, 0 atoms).
+    Valid for property tagging; parseable by RDKit / OpenBabel / ChemDraw.
+    """
+    blocks = []
+    for i, c in enumerate(candidates):
+        unc = c.get("uncertainty", 0)
+        unc_val = round(unc, 4) if isinstance(unc, float) else 0.0
+        props = [
+            ("RANK",             str(i + 1)),
+            ("FORMULA",          str(c.get("formula", ""))),
+            ("COMPOSITE_SCORE",  str(round(c.get("composite_score",   0), 4))),
+            ("ACTIVITY_SCORE",   str(round(c.get("activity_score",    0), 4))),
+            ("STABILITY_SCORE",  str(round(c.get("stability_score",   0), 4))),
+            ("SELECTIVITY_SCORE",str(round(c.get("selectivity_score", 0), 4))),
+            ("ADSORPTION_E_EV",  str(round(c.get("adsorption_energy", 0), 4))),
+            ("UNCERTAINTY",      str(unc_val)),
+            ("SURFACE_FACET",    str(c.get("surface_facet", ""))),
+            ("SOURCE",           str(c.get("source", ""))),
+            ("REACTION",         str(c.get("reaction", ""))),
+        ]
+        lines = [
+            c.get("name", f"candidate_{i+1}"),
+            f"  ChemAI  {datetime.now().strftime('%m%d%y%H%M')}",
+            "",
+            "  0  0  0  0  0  0  0  0  0  0999 V2000",
+            "M  END",
+        ]
+        for tag, val in props:
+            lines += [f">  <{tag}>", val, ""]
+        lines.append("$$$$")
+        blocks.append("\n".join(lines))
+    return "\n".join(blocks)
+
+
+def generate_lab_report(candidates: list, reaction: str, top_n: int = 5) -> str:
+    """Plain-text lab brief for the top-n candidates."""
+    sep   = "=" * 64
+    lines = [
+        sep,
+        "ChemAI — Catalyst Candidate Lab Brief",
+        f"Reaction  : {reaction}",
+        f"Generated : {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        f"Top-{top_n} candidates recommended for experimental testing",
+        sep, "",
+    ]
+    for i, c in enumerate(candidates[:top_n]):
+        unc = c.get("uncertainty", "—")
+        lines += [
+            f"#{i+1}  {c.get('name', '—')}",
+            f"    Formula         : {c.get('formula', '—')}",
+            f"    Composite Score : {c.get('composite_score',   0):.4f}",
+            f"    Activity        : {c.get('activity_score',    0):.4f}",
+            f"    Stability       : {c.get('stability_score',   0):.4f}",
+            f"    Selectivity     : {c.get('selectivity_score', 0):.4f}",
+            f"    Adsorption E    : {c.get('adsorption_energy', 0):.3f} eV",
+            f"    Surface Facet   : {c.get('surface_facet', '—')}",
+            f"    Uncertainty     : {round(unc, 4) if isinstance(unc, float) else unc}",
+            f"    Source          : {c.get('source', '—')}",
+            "",
+        ]
+    lines += [
+        "-" * 64,
+        "Generated by ChemAI — Unified AI Lab for Fuel Discovery",
+        "Stack: Streamlit · scikit-learn · Plotly · SQLite",
+    ]
+    return "\n".join(lines)

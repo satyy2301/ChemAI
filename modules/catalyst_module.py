@@ -5,6 +5,8 @@ import pandas as pd
 from pathlib import Path
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
+from sklearn.mixture import GaussianMixture
+from sklearn.decomposition import PCA
 import plotly.graph_objects as go
 import plotly.express as px
 
@@ -52,6 +54,7 @@ REACTION_LABELS = {
     "Fischer_Tropsch": "Fischer-Tropsch (CO → Fuel)",
     "CO_Oxidation":    "CO Oxidation",
     "OER":             "Water Splitting (OER)",
+    "Ethanol_to_Jet":  "Ethanol → Jet Fuel (ATJ)",
 }
 
 # ─── Feature engineering ──────────────────────────────────────────────────────
@@ -134,10 +137,126 @@ class CatalystPredictor:
         self._fit(base_catalysts + extra_catalysts)
 
 
+# ─── Generative model (PCA latent space + GMM prior) ─────────────────────────
+
+class LatentSpaceGenerator:
+    """
+    Generative model for novel catalyst compositions.
+
+    Architecture (VAE-analogue, no neural network required):
+      • Encoder  — PCA compresses the element-fraction matrix to a low-dim latent space.
+      • Prior    — Gaussian Mixture Model fitted to the latent codes of known catalysts.
+      • Decoder  — PCA inverse-transform + soft-max renormalisation → valid composition.
+      • Sampling — draw from the GMM, add temperature-scaled noise, decode, pick top-k elements.
+
+    Difference from rule-based generation:
+      Rule-based adds a fixed dopant at 5-15% (deterministic + random choice from a hand-coded list).
+      This model learns the *joint distribution* of element co-occurrence from data, then
+      samples genuinely novel points in that distribution — closer to a VAE/flow-based generator.
+    """
+
+    def __init__(self, n_latent: int = 6, n_mixtures: int = 5,
+                 random_state: int = 42):
+        self._n_latent    = n_latent
+        self._n_mixtures  = n_mixtures
+        self._rng_state   = random_state
+        self._fitted      = False
+        self._element_pool = list(ELEMENT_PROPS.keys())
+        self._pca: PCA | None = None
+        self._gmm: GaussianMixture | None = None
+
+    def fit(self, catalysts: list) -> "LatentSpaceGenerator":
+        n_el = len(self._element_pool)
+        X    = np.zeros((len(catalysts), n_el))
+        for i, cat in enumerate(catalysts):
+            for j, el in enumerate(self._element_pool):
+                X[i, j] = cat["composition"].get(el, 0.0)
+
+        n_lat = min(self._n_latent, len(catalysts) - 1, n_el)
+        self._pca = PCA(n_components=n_lat, random_state=self._rng_state)
+        Z = self._pca.fit_transform(X)
+
+        n_mix = min(self._n_mixtures, max(2, len(catalysts) // 3))
+        self._gmm = GaussianMixture(
+            n_components=n_mix, covariance_type="full",
+            random_state=self._rng_state, n_init=3,
+        )
+        self._gmm.fit(Z)
+        self._fitted = True
+        return self
+
+    def sample_compositions(self, n: int, temperature: float = 1.0,
+                            base: dict | None = None) -> list[dict]:
+        """
+        Draw n novel compositions from the learned latent distribution.
+
+        temperature > 1.0  →  more diverse (higher exploration)
+        temperature < 1.0  →  stays closer to training-data manifold
+        base               →  blends sample toward this catalyst's latent code
+        """
+        if not self._fitted:
+            raise RuntimeError("Call fit() first.")
+
+        rng = np.random.default_rng(self._rng_state)
+
+        # 1. Sample latent codes from the GMM (oversample then deduplicate)
+        z_raw, _ = self._gmm.sample(n * 6)
+        if temperature != 1.0:
+            noise_std = np.std(z_raw, axis=0).clip(0.01) * abs(temperature - 1.0)
+            z_raw += rng.normal(0, noise_std, z_raw.shape)
+
+        # 2. Optional: condition toward a base catalyst in latent space
+        if base is not None:
+            n_el = len(self._element_pool)
+            x_b  = np.zeros((1, n_el))
+            for j, el in enumerate(self._element_pool):
+                x_b[0, j] = base["composition"].get(el, 0.0)
+            z_base  = self._pca.transform(x_b)
+            z_raw   = 0.65 * z_raw + 0.35 * z_base   # soft conditioning
+
+        # 3. Decode: PCA inverse → composition space
+        X_dec = self._pca.inverse_transform(z_raw)
+
+        # 4. Parse decoded vectors into valid compositions
+        seen, results = set(), []
+        for vec in X_dec:
+            vec = np.clip(vec, 0, None)
+            k   = int(rng.integers(2, 5))           # 2–4 elements
+            if vec.sum() < 1e-6:
+                vec = rng.random(len(vec))
+            top_idx = np.argsort(vec)[-k:]
+            fracs   = vec[top_idx]
+            total   = fracs.sum()
+            fracs   = fracs / total if total > 1e-6 else np.ones(k) / k
+
+            comp = {self._element_pool[i]: round(float(f), 3)
+                    for i, f in zip(top_idx, fracs) if f >= 0.05}
+            if not comp:
+                comp = {"Cu": 0.6, "Zn": 0.4}
+            s = sum(comp.values())
+            comp = {e: round(v / s, 3) for e, v in comp.items()}
+
+            key = tuple(sorted(comp.items()))
+            if key not in seen:
+                seen.add(key)
+                results.append(comp)
+            if len(results) >= n:
+                break
+
+        # fallback for underflow
+        while len(results) < n:
+            e1, e2 = rng.choice(self._element_pool, 2, replace=False)
+            f = round(float(rng.uniform(0.3, 0.7)), 2)
+            results.append({e1: f, e2: round(1.0 - f, 2)})
+
+        return results[:n]
+
+
 # ─── Catalyst database helpers ───────────────────────────────────────────────
 
-_DB_PATH = Path(__file__).parent.parent / "data" / "catalysts_db.json"
-_PREDICTOR: CatalystPredictor | None = None
+_DB_PATH   = Path(__file__).parent.parent / "data" / "catalysts_db.json"
+_PREDICTOR: CatalystPredictor       | None = None
+_GENERATOR: LatentSpaceGenerator    | None = None
 
 
 def _load_raw() -> list:
@@ -150,6 +269,13 @@ def get_predictor() -> CatalystPredictor:
     if _PREDICTOR is None:
         _PREDICTOR = CatalystPredictor(_load_raw())
     return _PREDICTOR
+
+
+def get_generator() -> LatentSpaceGenerator:
+    global _GENERATOR
+    if _GENERATOR is None:
+        _GENERATOR = LatentSpaceGenerator(n_latent=6, n_mixtures=5).fit(_load_raw())
+    return _GENERATOR
 
 
 def load_catalysts(reaction_filter: str | None = None) -> list:
@@ -175,8 +301,55 @@ def _clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 
+def _generate_generative(base: dict, n: int) -> list:
+    """
+    Sample n novel candidates from the GMM latent-space generator.
+    Compositions come from the learned element-distribution, not hand-coded rules.
+    """
+    gen       = get_generator()
+    predictor = get_predictor()
+    rng_py    = random.Random(base.get("id", "seed"))
+
+    compositions = gen.sample_compositions(n, temperature=1.25, base=base)
+
+    results = []
+    for i, comp in enumerate(compositions):
+        pred        = predictor.predict(comp)
+        uncertainty = predictor.uncertainty(comp)
+
+        el_sorted  = sorted(comp.items(), key=lambda x: x[1], reverse=True)
+        name_parts = [f"{e}{int(f * 100)}" for e, f in el_sorted[:2]]
+        name       = "/".join(name_parts) + " (GEN)"
+        formula    = "-".join(e for e, _ in el_sorted[:3])
+
+        results.append({
+            "id":               f"gen_{base['id']}_{i+1:02d}",
+            "name":             name,
+            "formula":          formula,
+            "composition":      comp,
+            "support":          base.get("support", "None"),
+            "surface_facet":    rng_py.choice(SURFACE_FACETS),
+            "reaction":         base["reaction"],
+            "adsorption_energy":round(pred["adsorption_energy"], 3),
+            "stability_score":  round(_clamp(pred["stability_score"],   0, 1), 3),
+            "activity_score":   round(_clamp(pred["activity_score"],    0, 1), 3),
+            "selectivity_score":round(_clamp(
+                base.get("selectivity_score", 0.85) + rng_py.uniform(-0.08, 0.08), 0, 1), 3),
+            "uncertainty":      round(uncertainty, 4),
+            "source":           "AI-generated (Generative)",
+            "description":      (
+                f"Sampled from GMM latent-space distribution fitted on {len(_load_raw())} "
+                f"known catalysts. Base: {base['name']}. Temperature: 1.25."
+            ),
+        })
+    return results
+
+
 def generate_variations(base: dict, strategy: str = "mixed", n: int = 5) -> list:
     """Generate n catalyst variants from a base catalyst."""
+    if strategy == "generative":
+        return _generate_generative(base, n)
+
     predictor = get_predictor()
     results = []
     rng = random.Random(42)
@@ -409,6 +582,7 @@ _REACTION_REFS: dict[str, float] = {
     "Methanation":     -0.80,
     "CO_Oxidation":    -0.45,
     "OER":             -0.38,
+    "Ethanol_to_Jet":  -0.62,
 }
 
 # Base energy profiles per reaction (eV, relative to reactants = 0.00).
@@ -508,6 +682,18 @@ _BASE_PROFILES: dict[str, dict] = {
             ("O₂ + H⁺ + e⁻",   1.23),
         ],
         "ts_energies": [0.72, 1.25, 1.68, 1.80],
+    },
+    "Ethanol_to_Jet": {
+        "equation": "C₂H₅OH → Jet Fuel (C₈–C₁₆) + H₂O",
+        "intermediates": [
+            ("C₂H₅OH (g)",        0.00),
+            ("C₂H₅OH* (ads)",     0.18),
+            ("C₂H₄* + H₂O",     -0.42),
+            ("C₄H₈* (dimer)",    -0.88),
+            ("C₈⁺ oligomers",    -1.30),
+            ("Jet HC + H₂O",     -0.82),
+        ],
+        "ts_energies": [0.52, 0.28, -0.10, -0.55, -0.45],
     },
 }
 

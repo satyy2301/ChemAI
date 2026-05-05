@@ -313,6 +313,27 @@ with st.sidebar:
     st.markdown('<div class="sidebar-logo">⚗️ ChemAI</div>', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-tagline">Unified AI Lab for Fuel Discovery</div>', unsafe_allow_html=True)
     st.divider()
+    # ── User Identity ──────────────────────────────────────────────────────────
+    _cu = st.session_state.get("current_user", "")
+    if not _cu:
+        st.markdown('<div style="font-size:0.73rem;font-weight:700;color:var(--text-2);letter-spacing:0.09em;margin-bottom:6px;">SIGN IN</div>', unsafe_allow_html=True)
+        _login_input = st.text_input("Username", placeholder="Your name or initials…",
+                                     label_visibility="collapsed", key="login_name_input")
+        if st.button("Sign In", key="sidebar_sign_in", use_container_width=True):
+            if _login_input.strip():
+                st.session_state["current_user"] = _login_input.strip()
+                st.rerun()
+    else:
+        st.markdown(f"""
+        <div style="background:rgba(0,212,255,0.08);border:1px solid rgba(0,212,255,0.18);
+                    border-radius:10px;padding:0.6rem 1rem;margin-bottom:0.5rem;">
+          <div style="font-size:0.68rem;font-weight:700;color:var(--cyan);letter-spacing:0.1em;margin-bottom:2px;">SIGNED IN AS</div>
+          <div style="font-size:0.88rem;font-weight:600;color:var(--text-1);">{_cu}</div>
+        </div>""", unsafe_allow_html=True)
+        if st.button("Sign Out", key="sidebar_sign_out", use_container_width=True):
+            del st.session_state["current_user"]
+            st.rerun()
+    st.divider()
     page = st.radio(
         "Navigate",
         ["🏠 Overview", "⚗️ Catalyst Co-Pilot", "🧬 Bio Pathway Designer",
@@ -565,8 +586,24 @@ elif page == "⚗️ Catalyst Co-Pilot":
     </div>""", unsafe_allow_html=True)
     col1, col2, col3 = st.columns([2, 1, 1])
     with col1: base_name = st.selectbox("Base catalyst", [c["name"] for c in known])
-    with col2: strategy  = st.selectbox("Strategy", ["mixed", "doping", "surface"])
-    with col3: n_gen     = st.slider("Variants", 3, 8, 5)
+    with col2: strategy  = st.selectbox(
+        "Strategy",
+        ["mixed", "doping", "surface", "generative"],
+        format_func=lambda s: {
+            "mixed":       "Mixed (doping + surface)",
+            "doping":      "Doping (add element)",
+            "surface":     "Surface (facet swap)",
+            "generative":  "Generative AI (GMM latent space)",
+        }.get(s, s),
+    )
+    with col3: n_gen = st.slider("Variants", 3, 8, 5)
+    if strategy == "generative":
+        st.info(
+            "**Generative AI mode** — compositions are sampled from a Gaussian Mixture Model "
+            "fitted to the PCA-compressed latent space of all known catalysts. "
+            "Unlike rule-based doping, the model learns the *joint distribution* of element "
+            "co-occurrence and generates genuinely novel points in that space."
+        )
     base_cat = next(c for c in known if c["name"] == base_name)
 
     if st.button("🚀 Generate AI Candidates", use_container_width=True):
@@ -598,6 +635,52 @@ elif page == "⚗️ Catalyst Co-Pilot":
         } for i, c in enumerate(ranked)])
         st.dataframe(df_rank, use_container_width=True, hide_index=True)
         st.plotly_chart(cm.plot_tradeoff(ranked), use_container_width=True)
+
+        # ── Export ────────────────────────────────────────────────────────────
+        st.markdown('<div class="section-header">📤 Export Candidates</div>', unsafe_allow_html=True)
+        _export_n = st.slider(
+            "Top N candidates to export", 3, min(len(ranked), 20), min(5, len(ranked)),
+            key="export_n",
+        )
+        _rxn_slug = st.session_state.get("chosen_rxn", chosen_label).replace(" ", "_").replace("→", "to")
+        _ex1, _ex2, _ex3 = st.columns(3)
+        _ex1.download_button(
+            "⬇️ CSV",
+            data=fb.export_ranked_csv(ranked[:_export_n]),
+            file_name=f"chemai_{_rxn_slug}.csv",
+            mime="text/csv",
+            use_container_width=True,
+            key="dl_csv",
+            help="Ranked properties table — opens in Excel / pandas",
+        )
+        _ex2.download_button(
+            "⬇️ JSON",
+            data=fb.export_ranked_json(ranked[:_export_n]),
+            file_name=f"chemai_{_rxn_slug}.json",
+            mime="application/json",
+            use_container_width=True,
+            key="dl_json",
+            help="Full properties in JSON — pipe into downstream tools",
+        )
+        _ex3.download_button(
+            "⬇️ SDF",
+            data=fb.generate_candidates_sdf(ranked[:_export_n]).encode("utf-8"),
+            file_name=f"chemai_{_rxn_slug}.sdf",
+            mime="chemical/x-mdl-sdfile",
+            use_container_width=True,
+            key="dl_sdf",
+            help="Property-tagged SDF — compatible with RDKit / OpenBabel / ChemDraw",
+        )
+        with st.expander("📋 Lab Report Preview  (download as .txt)"):
+            _report_txt = fb.generate_lab_report(ranked, chosen_label, top_n=_export_n)
+            st.code(_report_txt, language=None)
+            st.download_button(
+                "⬇️ Download Lab Report",
+                data=_report_txt.encode("utf-8"),
+                file_name=f"chemai_lab_report_{_rxn_slug}.txt",
+                mime="text/plain",
+                key="dl_report",
+            )
 
         # Step 5
         st.divider()
@@ -715,15 +798,25 @@ elif page == "⚗️ Catalyst Co-Pilot":
             pred_val   = col_p.number_input("Predicted activity",   value=float(exp_cat["activity_score"]), step=0.01, format="%.3f", key="cat_pred")
             actual_val = col_a.number_input("Measured activity (lab)", value=float(exp_cat["activity_score"]), step=0.01, format="%.3f", key="cat_actual")
             notes = st.text_input("Notes", placeholder="e.g., 250°C, 50 bar, 24 h", key="cat_notes")
+            _prov_labels = {"internal_experiment": "Internal Experiment", "published_paper": "Published Paper",
+                            "screening": "Screening Campaign", "db_retrieved": "DB Retrieved", "ai_simulation": "AI Simulation"}
+            col_prov, col_qual = st.columns(2)
+            cat_provenance = col_prov.selectbox(
+                "Data source", list(_prov_labels.keys()),
+                format_func=lambda x: _prov_labels.get(x, x), key="cat_provenance",
+            )
+            cat_quality = col_qual.selectbox("Data quality", ["good", "uncertain", "outlier"], key="cat_quality")
             if st.button("✅ Submit Experiment", key="cat_submit"):
+                _user = st.session_state.get("current_user", "anonymous")
                 fb.log_experiment(
                     exp_type="catalyst", name=exp_name,
                     pred_value=pred_val, actual_value=actual_val,
                     metric="activity", notes=notes, composition=exp_cat.get("composition", {}),
+                    user=_user, data_quality=cat_quality, source_provenance=cat_provenance,
                 )
                 err = abs(actual_val - pred_val)
                 fb.record_retrain("catalyst", mae=err, rmse=err*1.2, n_samples=len(fb.get_experiments("catalyst")))
-                st.success(f"Experiment logged! |Error| = {err:.3f}")
+                st.success(f"Logged by **{_user}** · |Error| = {err:.3f}")
                 st.balloons()
 
 
@@ -812,6 +905,27 @@ elif page == "🧬 Bio Pathway Designer":
                 )
                 st.success("Top intervention queued for virtual lab execution.")
 
+        # ── Flux Balance Analysis ─────────────────────────────────────────────
+        st.markdown('<div class="section-header">⚗️ Flux Balance Analysis</div>', unsafe_allow_html=True)
+        _fba = bm.run_fba(chosen_path, scenario)
+        _fba_c1, _fba_c2, _fba_c3 = st.columns(3)
+        _fba_c1.metric("FBA Optimal Yield",  f"{_fba['optimal_yield']:.3f} g/g")
+        _fba_c2.metric("Flux-Limiting Step", (_fba.get("limiting_step") or "—")[:30])
+        _fba_c3.metric("FBA Status",         _fba.get("status", "—").capitalize())
+        st.plotly_chart(bm.plot_fba_fluxes(_fba), use_container_width=True)
+        with st.expander("📊 FBA details — flux table"):
+            if _fba.get("fluxes"):
+                _fba_df = pd.DataFrame([
+                    {"Reaction": r,
+                     "Optimised Flux": f"{v:.4f}",
+                     "Capacity": f"{_fba['efficiency_bounds'][i]:.4f}" if i < len(_fba.get("efficiency_bounds", [])) else "—",
+                     "Limiting": "🔴 YES" if r == _fba.get("limiting_step") else ""}
+                    for i, (r, v) in enumerate(_fba["fluxes"].items())
+                ])
+                st.dataframe(_fba_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("FBA returned no flux data.")
+
         st.divider()
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Organism",          chosen_path["organism"].split(" ")[0])
@@ -888,12 +1002,53 @@ elif page == "🧬 Bio Pathway Designer":
                 </div>""", unsafe_allow_html=True)
         with col_m:
             st.markdown('<div class="section-header">🧬 AI Mutation Suggestions</div>', unsafe_allow_html=True)
-            for i, sug in enumerate(bm.suggest_mutations(chosen_path, n=4), 1):
+            _mut_sugs = bm.suggest_mutations(chosen_path, n=4)
+            for i, sug in enumerate(_mut_sugs, 1):
                 st.markdown(f"""
                 <div class="apple-card-sm" style="border-left:3px solid var(--cyan);">
                     <span style="font-size:0.7rem;font-weight:700;color:var(--cyan);">#{i}</span>
                     <span style="font-size:0.85rem;color:var(--text-1);margin-left:8px;">{sug}</span>
                 </div>""", unsafe_allow_html=True)
+
+        # ── Protein Structure Viewer ──────────────────────────────────────────
+        st.markdown('<div class="section-header">🧬 Bottleneck Enzyme — 3D Protein Structure</div>', unsafe_allow_html=True)
+        _bottle_step = bm.get_bottleneck_step(chosen_path)
+        if _bottle_step:
+            _ec   = _bottle_step.get("ec", "multi")
+            _enz  = _bottle_step.get("enzyme", "Enzyme")
+            _gene = _bottle_step.get("gene", "—")
+            _prot_html, _prot_effect = mv.make_protein_viewer_html(
+                _enz, _ec, _mut_sugs, width=620, height=430,
+            )
+            _prot_col, _prot_info = st.columns([3, 2])
+            with _prot_col:
+                components.html(_prot_html, height=450, scrolling=False)
+            with _prot_info:
+                st.markdown(f"""
+                <div class="apple-card">
+                  <div class="step-label">ENZYME INFO</div>
+                  <div style="font-size:1rem;font-weight:700;color:var(--text-1);margin-bottom:6px;">{_enz}</div>
+                  <div style="font-size:0.82rem;color:var(--text-2);line-height:1.7;">
+                    Gene: <strong style="color:var(--cyan);">{_gene}</strong><br>
+                    EC: <strong style="color:var(--accent);">{_ec}</strong><br>
+                    Step: <strong style="color:var(--text-1);">{_bottle_step.get("from","")} → {_bottle_step.get("to","")}</strong><br>
+                    Efficiency: <strong style="color:var(--danger);">{_bottle_step.get("efficiency",0)*100:.0f}%</strong>
+                  </div>
+                </div>""", unsafe_allow_html=True)
+                st.markdown(f"""
+                <div class="apple-card" style="margin-top:0.5rem;">
+                  <div class="step-label">ESTIMATED MUTATION EFFECTS</div>
+                  <div style="font-size:0.82rem;color:var(--text-2);line-height:1.8;margin-top:4px;">
+                    Yield gain: <strong style="color:var(--success);">+{_prot_effect['estimated_gain']:.1%}</strong><br>
+                    Avg risk: <strong style="color:var(--danger);">{_prot_effect['estimated_risk']:.1%}</strong><br>
+                    <span style="font-size:0.75rem;color:var(--text-2);">
+                      Interventions parsed: {len(_prot_effect['interventions_parsed'])}
+                    </span>
+                  </div>
+                </div>""", unsafe_allow_html=True)
+                st.caption("🟠 Orange sticks = active-site residues. Rotate freely in the viewer.")
+        else:
+            st.info("No bottleneck step identified for this pathway.")
 
         # Intervention Optimizer
         st.markdown('<div class="section-header">🎯 Intervention Optimizer</div>', unsafe_allow_html=True)
@@ -944,14 +1099,24 @@ elif page == "🧬 Bio Pathway Designer":
             pred_val   = col_p.number_input("Predicted yield",    value=round(sim["predicted_yield"], 3), step=0.01, format="%.3f")
             actual_val = col_a.number_input("Measured yield (lab)", value=round(chosen_path["yield_g_per_g"], 3), step=0.01, format="%.3f")
             notes = st.text_input("Notes", placeholder="e.g., 37°C, pH 7, fed-batch")
+            _bio_prov_labels = {"internal_experiment": "Internal Experiment", "published_paper": "Published Paper",
+                                "screening": "Screening Campaign", "db_retrieved": "DB Retrieved", "ai_simulation": "AI Simulation"}
+            col_prov2, col_qual2 = st.columns(2)
+            bio_provenance = col_prov2.selectbox(
+                "Data source", list(_bio_prov_labels.keys()),
+                format_func=lambda x: _bio_prov_labels.get(x, x), key="bio_provenance",
+            )
+            bio_quality = col_qual2.selectbox("Data quality", ["good", "uncertain", "outlier"], key="bio_quality")
             if st.button("✅ Submit Bio Experiment"):
+                _user = st.session_state.get("current_user", "anonymous")
                 fb.log_experiment(
                     exp_type="bio", name=chosen_path["name"],
                     pred_value=pred_val, actual_value=actual_val, metric="yield", notes=notes,
+                    user=_user, data_quality=bio_quality, source_provenance=bio_provenance,
                 )
                 err = abs(actual_val - pred_val)
                 fb.record_retrain("bio", mae=err, rmse=err*1.2, n_samples=len(fb.get_experiments("bio")))
-                st.success(f"Experiment logged! |Error| = {err:.3f}")
+                st.success(f"Logged by **{_user}** · |Error| = {err:.3f}")
                 st.balloons()
 
         # Virtual Lab Queue
@@ -1140,7 +1305,7 @@ elif page == "📊 Experiment Dashboard":
     </div>
     """, unsafe_allow_html=True)
 
-    tab1, tab2, tab3 = st.tabs(["All Experiments", "Catalyst Model", "Bio Model"])
+    tab1, tab2, tab3, tab4 = st.tabs(["All Experiments", "Catalyst Model", "Bio Model", "👥 Collaboration"])
 
     with tab1:
         df_all = fb.get_experiments()
@@ -1154,12 +1319,77 @@ elif page == "📊 Experiment Dashboard":
                     <div class="apple-metric-label">Total Experiments</div>
                 </div>
             </div>""", unsafe_allow_html=True)
-            st.dataframe(
-                df_all[["timestamp","exp_type","name","metric","pred_value","actual_value","notes"]],
-                use_container_width=True, hide_index=True,
-            )
+            _show_cols = ["timestamp", "user", "exp_type", "name", "metric",
+                          "pred_value", "actual_value", "data_quality",
+                          "source_provenance", "version_tag", "notes"]
+            _show_cols = [c for c in _show_cols if c in df_all.columns]
+            st.dataframe(df_all[_show_cols], use_container_width=True, hide_index=True)
             st.plotly_chart(fb.plot_predicted_vs_actual(None), use_container_width=True)
             st.plotly_chart(fb.plot_experiment_timeline(),     use_container_width=True)
+
+            # ── Automated Discrepancy Flags ───────────────────────────────────
+            st.markdown('<div class="section-header">🚨 Automated Discrepancy Flags</div>', unsafe_allow_html=True)
+            _flag_col1, _flag_col2 = st.columns([3, 1])
+            with _flag_col2:
+                _thresh = st.slider(
+                    "Flag threshold  |error| ≥",
+                    min_value=0.01, max_value=0.15,
+                    value=0.02, step=0.01,
+                    key="flag_thresh",
+                    help="Experiments whose |actual − predicted| exceeds this value are flagged.",
+                )
+                _flag_type = st.selectbox(
+                    "Filter by type", ["all", "catalyst", "bio"], key="flag_type",
+                )
+            with _flag_col1:
+                _flagged = fb.flag_discrepancies(
+                    exp_type=None if _flag_type == "all" else _flag_type,
+                    threshold=_thresh,
+                )
+                if _flagged.empty:
+                    st.success(
+                        f"No experiments exceed the |error| ≥ {_thresh:.2f} threshold. "
+                        "Model predictions are within tolerance for all logged results."
+                    )
+                else:
+                    st.warning(
+                        f"**{len(_flagged)} experiment(s)** flagged  "
+                        f"(|error| > {_thresh:.2f}).  "
+                        "AI hypotheses are shown below each flag."
+                    )
+                    for _, _fl in _flagged.head(5).iterrows():
+                        _is_over   = _fl["flag"] == "OVER-PREDICTED"
+                        _fc        = "var(--danger)"  if _is_over else "var(--warning)"
+                        _fbg       = "rgba(255,69,58,0.10)" if _is_over else "rgba(255,159,10,0.10)"
+                        _pred_v    = float(_fl["pred_value"]   or 0)
+                        _actual_v  = float(_fl["actual_value"] or 0)
+                        _abs_err   = float(_fl["abs_error"]    or 0)
+                        st.markdown(f"""
+                        <div class="apple-card" style="border-left:3px solid {_fc};margin-bottom:0.9rem;">
+                          <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+                            <span style="font-size:1.1rem;">🚨</span>
+                            <span style="font-size:0.92rem;font-weight:700;color:var(--text-1);">
+                              {_fl['name']}
+                            </span>
+                            <span style="background:{_fbg};color:{_fc};
+                                         border:1px solid {_fc};padding:2px 10px;
+                                         border-radius:999px;font-size:0.72rem;font-weight:700;
+                                         margin-left:auto;">{_fl['flag']}</span>
+                          </div>
+                          <div style="display:flex;gap:2rem;font-size:0.8rem;color:var(--text-2);margin-bottom:8px;">
+                            <span>Predicted: <strong style="color:var(--text-1);">{_pred_v:.3f}</strong></span>
+                            <span>Actual: <strong style="color:var(--text-1);">{_actual_v:.3f}</strong></span>
+                            <span>|Error|: <strong style="color:{_fc};">{_abs_err:.3f}</strong></span>
+                            <span>Type: <strong style="color:var(--text-1);">{_fl['exp_type']}</strong></span>
+                            <span>User: <strong style="color:var(--cyan);">{_fl.get('user','—')}</strong></span>
+                          </div>
+                          <div style="font-size:0.8rem;color:var(--text-2);line-height:1.55;
+                                      background:rgba(255,255,255,0.03);border-radius:8px;
+                                      padding:8px 12px;">
+                            💡 <strong style="color:var(--cyan);">AI Hypothesis:</strong>&nbsp;
+                            {_fl['hypothesis']}
+                          </div>
+                        </div>""", unsafe_allow_html=True)
 
         st.markdown('<div class="section-header">🏆 Adaptive Learning Leaderboard</div>', unsafe_allow_html=True)
         lb = fb.leaderboard_by_impact(limit=8)
@@ -1198,3 +1428,102 @@ elif page == "📊 Experiment Dashboard":
         df_bio = fb.get_experiments("bio")
         if not df_bio.empty:
             st.dataframe(df_bio[["timestamp","name","pred_value","actual_value","notes"]], use_container_width=True, hide_index=True)
+
+    with tab4:
+        # ── User Activity ──────────────────────────────────────────────────────
+        st.markdown('<div class="section-header">👥 User Activity</div>', unsafe_allow_html=True)
+        _activity = fb.get_user_activity()
+        if _activity.empty:
+            st.info("No user activity yet. Sign in and log an experiment to appear here.")
+        else:
+            _act_cols = st.columns(min(len(_activity), 4))
+            for _i, (_, _row) in enumerate(_activity.iterrows()):
+                if _i < 4:
+                    _act_cols[_i].markdown(f"""
+                    <div class="apple-metric">
+                        <div class="apple-metric-icon">👤</div>
+                        <div class="apple-metric-value" style="font-size:1.3rem;">{_row['user']}</div>
+                        <div class="apple-metric-label">{int(_row['experiments'])} experiments</div>
+                        <div style="font-size:0.7rem;color:var(--text-3);margin-top:4px;">
+                            Last: {str(_row['last_active'])[:10]}
+                        </div>
+                    </div>""", unsafe_allow_html=True)
+
+        st.divider()
+
+        # ── Data Provenance ────────────────────────────────────────────────────
+        st.markdown('<div class="section-header">📦 Data Provenance</div>', unsafe_allow_html=True)
+        st.plotly_chart(fb.plot_provenance_chart(), use_container_width=True)
+
+        st.divider()
+
+        # ── Annotations ────────────────────────────────────────────────────────
+        st.markdown('<div class="section-header">📝 Annotations & Shared Notes</div>', unsafe_allow_html=True)
+        _ann_left, _ann_right = st.columns([2, 1])
+
+        with _ann_right:
+            st.markdown("""
+            <div class="apple-card" style="margin-bottom:0.8rem;">
+              <div class="step-label">ADD ANNOTATION</div>
+            </div>""", unsafe_allow_html=True)
+            _ann_user = st.session_state.get("current_user", "anonymous")
+            st.caption(f"Posting as **{_ann_user}**")
+            _ann_exp_type = st.selectbox("Experiment type", ["catalyst", "bio"], key="ann_type")
+            _ann_exps = fb.get_experiments(_ann_exp_type)
+            _ann_names = sorted(_ann_exps["name"].unique().tolist()) if not _ann_exps.empty else []
+            _ann_target = st.selectbox("Target experiment", _ann_names, key="ann_target") if _ann_names else None
+            _ann_text = st.text_area(
+                "Note / hypothesis / flag",
+                placeholder="e.g., Fe segregation explains over-performance. Flag for re-test.",
+                key="ann_text_input", height=110,
+            )
+            if st.button("💬 Post Annotation", key="post_ann", use_container_width=True):
+                if _ann_text.strip() and _ann_target:
+                    fb.add_annotation(
+                        user=_ann_user, text=_ann_text.strip(),
+                        exp_type=_ann_exp_type, target_name=_ann_target,
+                    )
+                    st.success(f"Posted by {_ann_user}!")
+                    st.rerun()
+                else:
+                    st.warning("Enter text and select a target experiment.")
+
+        with _ann_left:
+            _ann_df = fb.get_annotations()
+            if _ann_df.empty:
+                st.info("No annotations yet. Add the first note using the panel on the right.")
+            else:
+                for _, _ann in _ann_df.iterrows():
+                    st.markdown(f"""
+                    <div class="apple-card-sm" style="border-left:3px solid var(--accent);margin-bottom:0.7rem;">
+                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
+                            <span style="font-size:0.8rem;font-weight:700;color:var(--text-1);">👤 {_ann['user']}</span>
+                            <span style="font-size:0.72rem;color:var(--text-3);">{str(_ann['timestamp'])[:16]}</span>
+                            <span class="badge-ai" style="margin-left:auto;">{_ann.get('exp_type','')}</span>
+                        </div>
+                        <div style="font-size:0.77rem;color:var(--text-2);margin-bottom:4px;">
+                            Re: <strong style="color:var(--cyan);">{_ann.get('target_name','—')}</strong>
+                        </div>
+                        <div style="font-size:0.83rem;color:var(--text-1);line-height:1.45;">{_ann['text']}</div>
+                    </div>""", unsafe_allow_html=True)
+
+        st.divider()
+
+        # ── Version History ────────────────────────────────────────────────────
+        st.markdown('<div class="section-header">🕑 Version History</div>', unsafe_allow_html=True)
+        _vh_col1, _vh_col2 = st.columns([1, 2])
+        with _vh_col1:
+            _vh_type = st.selectbox("Experiment type", ["catalyst", "bio"], key="vh_type")
+            _vh_exps = fb.get_experiments(_vh_type)
+            _vh_names = sorted(_vh_exps["name"].unique().tolist()) if not _vh_exps.empty else []
+            _vh_name = st.selectbox("Experiment name", _vh_names, key="vh_name") if _vh_names else None
+        with _vh_col2:
+            if _vh_name:
+                _history = fb.get_experiment_history(_vh_name, _vh_type)
+                if not _history.empty:
+                    st.caption(f"{len(_history)} logged version(s) for **{_vh_name}**")
+                    st.dataframe(_history, use_container_width=True, hide_index=True)
+                else:
+                    st.info("No version history found for this experiment.")
+            else:
+                st.info("No experiments logged yet.")
