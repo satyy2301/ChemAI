@@ -512,7 +512,7 @@ def run_fba(pathway: dict, scenario: dict | None = None) -> dict:
 
     if result.status == 0:
         fluxes = {rxn_labels[j]: float(result.x[j]) for j in range(n_steps)}
-        eff_bounds = [float(b[1]) for b in bounds[:n_steps]]
+        eff_bounds = [float(b[1]) for b in bounds[:n_steps] if b[1] is not None]
         # Identify the step carrying lowest flux (= flux-limiting)
         limiting_idx = int(np.argmin(result.x[:n_steps]))
         return {

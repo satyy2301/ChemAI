@@ -196,6 +196,7 @@ class LatentSpaceGenerator:
         """
         if not self._fitted:
             raise RuntimeError("Call fit() first.")
+        assert self._pca is not None and self._gmm is not None
 
         rng = np.random.default_rng(self._rng_state)
 

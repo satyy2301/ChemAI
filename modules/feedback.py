@@ -565,7 +565,7 @@ def plot_provenance_chart() -> go.Figure:
         if sub.empty:
             continue
         fig.add_trace(go.Bar(
-            x=sub["source_provenance"].map(lambda x: label_map.get(x, x)),
+            x=sub["source_provenance"].map(lambda x: label_map.get(str(x), str(x))),
             y=sub["count"],
             name=quality.capitalize(),
             marker_color=quality_colors.get(quality, "#888"),
@@ -628,7 +628,7 @@ def _generate_hypothesis(row: pd.Series) -> str:
 
     n_el     = len(comp)
     el_class = "multi" if n_el >= 3 else "binary"
-    dominant = max(comp, key=comp.get) if comp else "unknown"
+    dominant = max(comp, key=lambda k: comp.get(k) or 0.0) if comp else "unknown"
 
     key      = (exp_type, direction, el_class if exp_type == "catalyst" else None)
     fallback = (exp_type, direction, None)
