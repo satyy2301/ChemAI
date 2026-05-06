@@ -191,5 +191,85 @@
       "Use nitrogen-limited fed-batch to trigger PHB accumulation"
     ],
     "co2_kg_per_ton_product": 500
+  },
+  {
+    "id": "path_009",
+    "name": "Cellulose → Ethanol (CBP)",
+    "input": "Cellulose",
+    "output": "Ethanol",
+    "organism": "Clostridium thermocellum",
+    "category": "Lignocellulosic Biofuel",
+    "yield_g_per_g": 0.38,
+    "difficulty": "High",
+    "steps": [
+      {"from": "Cellulose", "to": "Cellobiose", "enzyme": "Cellulosome complex (CelS)", "gene": "celS", "ec": "3.2.1.91", "efficiency": 0.72},
+      {"from": "Cellobiose", "to": "Glucose", "enzyme": "Beta-glucosidase", "gene": "bglA", "ec": "3.2.1.21", "efficiency": 0.88},
+      {"from": "Glucose", "to": "Pyruvate", "enzyme": "Glycolysis (EMP)", "gene": "pgi/pfk/pyk", "ec": "multi", "efficiency": 0.91},
+      {"from": "Pyruvate", "to": "Acetaldehyde", "enzyme": "Pyruvate decarboxylase", "gene": "pdc", "ec": "4.1.1.1", "efficiency": 0.85},
+      {"from": "Acetaldehyde", "to": "Ethanol", "enzyme": "Alcohol dehydrogenase", "gene": "adhE", "ec": "1.1.1.1", "efficiency": 0.82}
+    ],
+    "bottleneck": "Cellulose → Cellobiose (cellulosome loading; recalcitrant substrate)",
+    "known_improvements": [
+      "Engineer thermostable cellulases with increased substrate affinity",
+      "Delete competing fermentation pathways (acetate, lactate)",
+      "Express heterologous beta-glucosidase to reduce cellobiose inhibition",
+      "Use consolidated bioprocessing (CBP) to combine saccharification and fermentation"
+    ],
+    "co2_kg_per_ton_product": 820
+  },
+  {
+    "id": "path_010",
+    "name": "Xylose → Isobutanol (Lignocellulosic)",
+    "input": "Xylose",
+    "output": "Isobutanol",
+    "organism": "Escherichia coli (engineered)",
+    "category": "Lignocellulosic Biofuel",
+    "yield_g_per_g": 0.31,
+    "difficulty": "High",
+    "steps": [
+      {"from": "Xylose", "to": "Xylulose", "enzyme": "Xylose isomerase", "gene": "xylA", "ec": "5.3.1.5", "efficiency": 0.88},
+      {"from": "Xylulose", "to": "Xylulose-5-P", "enzyme": "Xylulokinase", "gene": "xylB", "ec": "2.7.1.17", "efficiency": 0.85},
+      {"from": "Xylulose-5-P", "to": "Pyruvate", "enzyme": "Pentose phosphate pathway", "gene": "tkt/tal/rpe", "ec": "multi", "efficiency": 0.80},
+      {"from": "Pyruvate", "to": "Acetolactate", "enzyme": "Acetolactate synthase", "gene": "ilvBN", "ec": "2.2.1.6", "efficiency": 0.78},
+      {"from": "Acetolactate", "to": "2,3-Dihydroxyisovalerate", "enzyme": "Acetohydroxy acid reductoisomerase", "gene": "ilvC", "ec": "1.1.1.86", "efficiency": 0.80},
+      {"from": "2,3-Dihydroxyisovalerate", "to": "2-Ketoisovalerate", "enzyme": "Dihydroxy acid dehydratase", "gene": "ilvD", "ec": "4.2.1.9", "efficiency": 0.76},
+      {"from": "2-Ketoisovalerate", "to": "Isobutyraldehyde", "enzyme": "2-Ketoacid decarboxylase", "gene": "Kivd", "ec": "4.1.1.72", "efficiency": 0.70},
+      {"from": "Isobutyraldehyde", "to": "Isobutanol", "enzyme": "Alcohol dehydrogenase", "gene": "Adh6", "ec": "1.1.1.1", "efficiency": 0.75}
+    ],
+    "bottleneck": "Xylulose-5-P → Pyruvate (PPP flux; redox imbalance on xylose)",
+    "known_improvements": [
+      "Overexpress transketolase/transaldolase to improve PPP flux",
+      "Engineer NADPH-dependent Kivd for better redox balance on xylose",
+      "Delete xylR repressor for constitutive xylose utilization",
+      "Co-express Pdc/Adh from Lactococcus lactis for higher titer"
+    ],
+    "co2_kg_per_ton_product": 680
+  },
+  {
+    "id": "path_011",
+    "name": "Switchgrass → Farnesene (SAF)",
+    "input": "Lignocellulose / Switchgrass",
+    "output": "β-Farnesene (C₁₅H₂₄)",
+    "organism": "Saccharomyces cerevisiae (engineered)",
+    "category": "Lignocellulosic Biofuel",
+    "yield_g_per_g": 0.14,
+    "difficulty": "High",
+    "steps": [
+      {"from": "Lignocellulose / Switchgrass", "to": "Glucose", "enzyme": "Cellulase cocktail + xylanase", "gene": "cel/xyn (external)", "ec": "3.2.1.91", "efficiency": 0.65},
+      {"from": "Glucose", "to": "Acetyl-CoA", "enzyme": "Glycolysis + PDH bypass", "gene": "PDC1/ALD6/ACS1", "ec": "multi", "efficiency": 0.84},
+      {"from": "Acetyl-CoA", "to": "HMG-CoA", "enzyme": "HMG-CoA synthase", "gene": "ERG13", "ec": "2.3.3.10", "efficiency": 0.80},
+      {"from": "HMG-CoA", "to": "Mevalonate", "enzyme": "HMG-CoA reductase", "gene": "tHMG1", "ec": "1.1.1.34", "efficiency": 0.78},
+      {"from": "Mevalonate", "to": "IPP/DMAPP", "enzyme": "Mevalonate pathway enzymes", "gene": "ERG12/ERG8/ERG19", "ec": "multi", "efficiency": 0.72},
+      {"from": "IPP/DMAPP", "to": "FPP", "enzyme": "Farnesyl-PP synthase (ERG20*)", "gene": "ERG20(F96W-N119W)", "ec": "2.5.1.1", "efficiency": 0.68},
+      {"from": "FPP", "to": "β-Farnesene (C₁₅H₂₄)", "enzyme": "Farnesene synthase", "gene": "FS (A. annua, codon-opt.)", "ec": "4.2.3.47", "efficiency": 0.62}
+    ],
+    "bottleneck": "Lignocellulose hydrolysis (low enzymatic saccharification of switchgrass recalcitrant lignin)",
+    "known_improvements": [
+      "Apply ionic liquid or AFEX pretreatment to disrupt lignin structure",
+      "Engineer cellulase cocktail secretion in S. cerevisiae for CBP",
+      "Downregulate ERG9 (squalene synthase) via CTA1 promoter to boost FPP",
+      "Use two-phase dodecane extraction to prevent farnesene toxicity"
+    ],
+    "co2_kg_per_ton_product": 1050
   }
 ]
