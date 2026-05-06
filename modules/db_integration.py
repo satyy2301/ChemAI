@@ -10,9 +10,10 @@ from typing import Optional
 
 import requests
 
-_CH_URL = "https://api.catalysis-hub.org/graphql"
-_MP_URL = "https://api.materialsproject.org/materials/summary/"
-_TIMEOUT = 10
+_CH_URL          = "https://api.catalysis-hub.org/graphql"
+_MP_URL_V2       = "https://api.materialsproject.org/materials/summary/"
+_MP_URL_LEGACY   = "https://www.materialsproject.org/rest/v2/materials/"
+_TIMEOUT = 12
 
 # ── species keywords for client-side reaction matching ────────────────────────
 _REACTION_SPECIES: dict[str, list[str]] = {
@@ -186,6 +187,61 @@ def _parse_energy_str(v) -> Optional[float]:
         return None
 
 
+def _normalize_mp_key(api_key: str) -> str:
+    """Trim whitespace/quotes and unwrap common pasted key formats."""
+    key = (api_key or "").strip().strip('"').strip("'")
+    # Only strip assignment prefix if the string literally starts with a known keyword
+    _low = key.lower()
+    for prefix in ("api_key=", "mp_api_key=", "key="):
+        if _low.startswith(prefix):
+            key = key[len(prefix):].strip().strip('"').strip("'")
+            break
+    return key
+
+
+def test_mp_key(api_key: str) -> dict:
+    """
+    Validate an MP key by performing a lightweight probe.
+    Tries v2 (new portal) first, then legacy MAPI.
+    Returns: {ok: bool, api_version: 'v2'|'legacy'|None, msg: str}
+    """
+    key = _normalize_mp_key(api_key)
+    if not key:
+        return {"ok": False, "api_version": None, "msg": "No key provided."}
+
+    # --- Try new v2 API ---
+    try:
+        r = requests.get(
+            _MP_URL_V2,
+            params={"formula": "Fe", "fields": "material_id", "_limit": 1},
+            headers={"X-API-KEY": key, "Accept": "application/json"},
+            timeout=_TIMEOUT,
+        )
+        if r.status_code == 200:
+            return {"ok": True, "api_version": "v2", "msg": "Key valid (new portal API v2)."}
+    except Exception:
+        pass
+
+    # --- Try legacy MAPI ---
+    try:
+        url = _MP_URL_LEGACY + "Fe/vasp"
+        r = requests.get(
+            url,
+            params={"API_KEY": key},
+            headers={"Accept": "application/json"},
+            timeout=_TIMEOUT,
+        )
+        if r.status_code == 200:
+            return {"ok": True, "api_version": "legacy", "msg": "Key valid (legacy MAPI)."}
+        if r.status_code == 401:
+            return {"ok": False, "api_version": None,
+                    "msg": "Key rejected (401) on both v2 and legacy APIs. Check your key at materialsproject.org."}
+    except Exception as exc:
+        return {"ok": False, "api_version": None, "msg": f"Network error: {exc}"}
+
+    return {"ok": False, "api_version": None, "msg": "Key not accepted by either Materials Project endpoint."}
+
+
 # ── public API ────────────────────────────────────────────────────────────────
 
 def fetch_catalysis_hub(
@@ -256,7 +312,8 @@ def fetch_materials_project(
       rows    : list of record dicts
       error   : error message (only on "error" status)
     """
-    if not api_key or api_key.strip() == "":
+    mp_key = _normalize_mp_key(api_key)
+    if not mp_key:
         return {"status": "no_key", "source": "Materials Project",
                 "rows": [], "error": "No API key provided"}
 
@@ -265,41 +322,72 @@ def fetch_materials_project(
     formula_elems = [e for e, _ in sorted_elems[:2]]
     formula = "-".join(formula_elems)
 
-    params = {
+    # ── Try new v2 API first ──────────────────────────────────────────────────
+    params_v2 = {
         "formula": formula,
         "fields": "material_id,formula_pretty,formation_energy_per_atom,energy_above_hull,band_gap,nsites",
         "_limit": max_results,
     }
-    headers = {"X-API-KEY": api_key.strip()}
-
+    last_status = None
     try:
-        r = requests.get(_MP_URL, params=params, headers=headers, timeout=_TIMEOUT)
-        if r.status_code == 401:
-            return {"status": "error", "source": "Materials Project",
-                    "rows": [], "error": "Invalid API key (401 Unauthorized)"}
-        r.raise_for_status()
-        items = r.json().get("data", [])
-    except requests.HTTPError as exc:
-        return {"status": "error", "source": "Materials Project",
-                "rows": [], "error": str(exc)}
+        r_v2 = requests.get(
+            _MP_URL_V2, params=params_v2,
+            headers={"X-API-KEY": mp_key, "Accept": "application/json"},
+            timeout=_TIMEOUT,
+        )
+        last_status = r_v2.status_code
+        if r_v2.status_code == 200:
+            items = r_v2.json().get("data", [])
+            rows = []
+            for it in items:
+                rows.append({
+                    "material_id": it.get("material_id", "?"),
+                    "formula": it.get("formula_pretty", formula),
+                    "formation_energy_ev_atom": _parse_energy_str(it.get("formation_energy_per_atom")),
+                    "energy_above_hull_ev": _parse_energy_str(it.get("energy_above_hull")),
+                    "band_gap_ev": _parse_energy_str(it.get("band_gap")),
+                    "n_sites": it.get("nsites"),
+                    "source": "Materials Project (v2)",
+                })
+            return {"status": "ok" if rows else "no_data", "source": "Materials Project", "rows": rows}
+    except Exception:
+        pass  # fall through to legacy
+
+    # ── Fall back to legacy MAPI (works with old-portal keys) ────────────────
+    try:
+        legacy_url = _MP_URL_LEGACY + f"{formula_elems[0]}/vasp"
+        r_leg = requests.get(
+            legacy_url,
+            params={"API_KEY": mp_key, "criteria": json.dumps({"elements": formula_elems}),
+                    "properties": "material_id,pretty_formula,formation_energy_per_atom,e_above_hull,band_gap,nsites"},
+            headers={"Accept": "application/json"},
+            timeout=_TIMEOUT,
+        )
+        last_status = r_leg.status_code
+        if r_leg.status_code == 200:
+            response_json = r_leg.json()
+            items = response_json.get("response", [])
+            rows = []
+            for it in items[:max_results]:
+                rows.append({
+                    "material_id": it.get("material_id", "?"),
+                    "formula": it.get("pretty_formula", formula),
+                    "formation_energy_ev_atom": _parse_energy_str(it.get("formation_energy_per_atom")),
+                    "energy_above_hull_ev": _parse_energy_str(it.get("e_above_hull")),
+                    "band_gap_ev": _parse_energy_str(it.get("band_gap")),
+                    "n_sites": it.get("nsites"),
+                    "source": "Materials Project (legacy)",
+                })
+            return {"status": "ok" if rows else "no_data", "source": "Materials Project", "rows": rows}
     except Exception as exc:
         return {"status": "error", "source": "Materials Project",
                 "rows": [], "error": f"Network error: {exc}"}
 
-    rows = []
-    for it in items:
-        rows.append({
-            "material_id": it.get("material_id", "?"),
-            "formula": it.get("formula_pretty", formula),
-            "formation_energy_ev_atom": _parse_energy_str(it.get("formation_energy_per_atom")),
-            "energy_above_hull_ev": _parse_energy_str(it.get("energy_above_hull")),
-            "band_gap_ev": _parse_energy_str(it.get("band_gap")),
-            "n_sites": it.get("nsites"),
-            "source": "Materials Project",
-        })
-
-    status = "ok" if rows else "no_data"
-    return {"status": status, "source": "Materials Project", "rows": rows}
+    if last_status == 401:
+        return {"status": "error", "source": "Materials Project", "rows": [],
+                "error": "Invalid API key (401). Check your key at materialsproject.org and re-submit via Sidebar > Database API Keys."}
+    return {"status": "error", "source": "Materials Project", "rows": [],
+            "error": f"Unexpected response (HTTP {last_status}) from Materials Project."}
 
 
 def fetch_brenda_local(reaction_key: str) -> dict:

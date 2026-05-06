@@ -313,27 +313,6 @@ with st.sidebar:
     st.markdown('<div class="sidebar-logo">⚗️ ChemAI</div>', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-tagline">Unified AI Lab for Fuel Discovery</div>', unsafe_allow_html=True)
     st.divider()
-    # ── User Identity ──────────────────────────────────────────────────────────
-    _cu = st.session_state.get("current_user", "")
-    if not _cu:
-        st.markdown('<div style="font-size:0.73rem;font-weight:700;color:var(--text-2);letter-spacing:0.09em;margin-bottom:6px;">SIGN IN</div>', unsafe_allow_html=True)
-        _login_input = st.text_input("Username", placeholder="Your name or initials…",
-                                     label_visibility="collapsed", key="login_name_input")
-        if st.button("Sign In", key="sidebar_sign_in", use_container_width=True):
-            if _login_input.strip():
-                st.session_state["current_user"] = _login_input.strip()
-                st.rerun()
-    else:
-        st.markdown(f"""
-        <div style="background:rgba(0,212,255,0.08);border:1px solid rgba(0,212,255,0.18);
-                    border-radius:10px;padding:0.6rem 1rem;margin-bottom:0.5rem;">
-          <div style="font-size:0.68rem;font-weight:700;color:var(--cyan);letter-spacing:0.1em;margin-bottom:2px;">SIGNED IN AS</div>
-          <div style="font-size:0.88rem;font-weight:600;color:var(--text-1);">{_cu}</div>
-        </div>""", unsafe_allow_html=True)
-        if st.button("Sign Out", key="sidebar_sign_out", use_container_width=True):
-            del st.session_state["current_user"]
-            st.rerun()
-    st.divider()
     page = st.radio(
         "Navigate",
         ["🏠 Overview", "⚗️ Catalyst Co-Pilot", "🧬 Bio Pathway Designer",
@@ -346,12 +325,37 @@ with st.sidebar:
     st.divider()
     with st.expander("🔑 Database API Keys"):
         st.caption("Materials Project (optional)")
-        _sidebar_mp_key = st.text_input(
+        _sidebar_mp_key_input = st.text_input(
             "MP API Key", type="password",
             placeholder="Paste your key…",
             help="Free key at materialsproject.org",
-            key="sidebar_mp_key",
+            value=st.session_state.get("sidebar_mp_key", ""),
         )
+        if st.button("✓ Save API Key", key="submit_mp_key", use_container_width=True):
+            st.session_state["sidebar_mp_key"] = (_sidebar_mp_key_input or "").strip()
+            st.success("Key saved.")
+            st.rerun()
+
+        if st.session_state.get("sidebar_mp_key", ""):
+            st.markdown(
+                '<div style="font-size:0.72rem;color:#30D158;margin:4px 0;">● Key active</div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("⚡ Test Connection", key="test_mp_key_btn", use_container_width=True):
+                with st.spinner("Testing…"):
+                    _result = db.test_mp_key(st.session_state["sidebar_mp_key"])
+                if _result["ok"]:
+                    st.success(_result["msg"])
+                else:
+                    st.error(_result["msg"])
+            if st.button("✕ Clear Key", key="clear_mp_key", use_container_width=True):
+                st.session_state["sidebar_mp_key"] = ""
+                st.rerun()
+        else:
+            st.markdown(
+                '<div style="font-size:0.72rem;color:#8E8E93;margin:4px 0;">○ No key saved</div>',
+                unsafe_allow_html=True,
+            )
         st.caption("Catalysis Hub: no key needed")
 
 
