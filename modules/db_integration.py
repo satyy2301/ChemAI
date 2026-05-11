@@ -25,6 +25,7 @@ _REACTION_SPECIES: dict[str, list[str]] = {
     "Methanation":     ["CO2gas", "CH4gas", "H2gas"],
     "N2_Fixation":     ["N2gas", "NHstar", "NH3gas", "Nstar"],
     "OER":             ["H2Ogas", "O2gas", "OHstar", "Ostar"],
+    "Syngas_to_Ethanol": ["COgas", "H2gas", "CH3CHOstar", "C2H5OHgas", "CHOstar"],
 }
 
 # ── BRENDA-curated enzyme kinetics (covers ChemAI bio pathways) ───────────────
@@ -213,7 +214,7 @@ def test_mp_key(api_key: str) -> dict:
     try:
         r = requests.get(
             _MP_URL_V2,
-            params={"formula": "Fe", "fields": "material_id", "_limit": 1},
+            params={"formula": "Fe", "_fields": "material_id", "_limit": 1},
             headers={"X-API-KEY": key, "Accept": "application/json"},
             timeout=_TIMEOUT,
         )
@@ -317,15 +318,15 @@ def fetch_materials_project(
         return {"status": "no_key", "source": "Materials Project",
                 "rows": [], "error": "No API key provided"}
 
-    # Build formula from dominant elements (top 2 by fraction)
+    # Build chemical system from dominant elements (top 2 by fraction)
     sorted_elems = sorted(composition.items(), key=lambda x: -x[1])
     formula_elems = [e for e, _ in sorted_elems[:2]]
-    formula = "-".join(formula_elems)
+    chemsys = "-".join(sorted(formula_elems))  # MP v2 requires alphabetical order for chemsys
 
     # ── Try new v2 API first ──────────────────────────────────────────────────
     params_v2 = {
-        "formula": formula,
-        "fields": "material_id,formula_pretty,formation_energy_per_atom,energy_above_hull,band_gap,nsites",
+        "chemsys": chemsys,
+        "_fields": "material_id,formula_pretty,formation_energy_per_atom,energy_above_hull,band_gap,nsites",
         "_limit": max_results,
     }
     last_status = None
@@ -342,7 +343,7 @@ def fetch_materials_project(
             for it in items:
                 rows.append({
                     "material_id": it.get("material_id", "?"),
-                    "formula": it.get("formula_pretty", formula),
+                    "formula": it.get("formula_pretty", chemsys),
                     "formation_energy_ev_atom": _parse_energy_str(it.get("formation_energy_per_atom")),
                     "energy_above_hull_ev": _parse_energy_str(it.get("energy_above_hull")),
                     "band_gap_ev": _parse_energy_str(it.get("band_gap")),
@@ -371,7 +372,7 @@ def fetch_materials_project(
             for it in items[:max_results]:
                 rows.append({
                     "material_id": it.get("material_id", "?"),
-                    "formula": it.get("pretty_formula", formula),
+                    "formula": it.get("pretty_formula", chemsys),
                     "formation_energy_ev_atom": _parse_energy_str(it.get("formation_energy_per_atom")),
                     "energy_above_hull_ev": _parse_energy_str(it.get("e_above_hull")),
                     "band_gap_ev": _parse_energy_str(it.get("band_gap")),
