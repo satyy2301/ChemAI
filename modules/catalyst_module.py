@@ -55,6 +55,7 @@ REACTION_LABELS = {
     "CO_Oxidation":    "CO Oxidation",
     "OER":             "Water Splitting (OER)",
     "Ethanol_to_Jet":  "Ethanol → Jet Fuel (ATJ)",
+    "Syngas_to_Ethanol": "Syngas → Ethanol",
 }
 
 # ─── Feature engineering ──────────────────────────────────────────────────────
@@ -583,7 +584,8 @@ _REACTION_REFS: dict[str, float] = {
     "Methanation":     -0.80,
     "CO_Oxidation":    -0.45,
     "OER":             -0.38,
-    "Ethanol_to_Jet":  -0.62,
+    "Ethanol_to_Jet":    -0.62,
+    "Syngas_to_Ethanol": -0.55,
 }
 
 # Base energy profiles per reaction (eV, relative to reactants = 0.00).
@@ -695,6 +697,19 @@ _BASE_PROFILES: dict[str, dict] = {
             ("Jet HC + H₂O",     -0.82),
         ],
         "ts_energies": [0.52, 0.28, -0.10, -0.55, -0.45],
+    },
+    "Syngas_to_Ethanol": {
+        "equation": "2CO + 4H₂ → C₂H₅OH + H₂O",
+        "intermediates": [
+            ("2CO + 4H₂",         0.00),
+            ("CO* + CO + 4H*",    0.14),
+            ("CHO* + CO + 3H*",  -0.28),
+            ("CH₂* + CO + 3H*",  -0.62),
+            ("CH₃CO* + 2H*",     -1.05),
+            ("CH₃CHO* + H*",     -1.38),
+            ("C₂H₅OH + H₂O",    -0.92),
+        ],
+        "ts_energies": [0.48, 0.38, -0.05, -0.35, -0.72, -0.65],
     },
 }
 

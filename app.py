@@ -323,6 +323,23 @@ with st.sidebar:
     st.caption("Theme 4 · AI for Catalyst & Pathway Discovery")
     st.caption("Stack: Streamlit · scikit-learn · Plotly · SQLite")
     st.divider()
+    with st.expander("👤 Researcher Profile", expanded=False):
+        _name_input = st.text_input(
+            "Your name", placeholder="e.g. Alice",
+            value=st.session_state.get("current_user", ""),
+            help="Used to attribute experiment logs and annotations.",
+        )
+        if st.button("Save Name", key="save_username", use_container_width=True):
+            _name = (_name_input or "").strip()
+            st.session_state["current_user"] = _name if _name else "anonymous"
+            st.success(f"Logged in as {st.session_state['current_user']}")
+            st.rerun()
+        _cur = st.session_state.get("current_user", "anonymous")
+        st.markdown(
+            f'<div style="font-size:0.72rem;color:#30D158;margin:4px 0;">● Active: {_cur}</div>',
+            unsafe_allow_html=True,
+        )
+    st.divider()
     with st.expander("🔑 Database API Keys"):
         st.caption("Materials Project (optional)")
         _sidebar_mp_key_input = st.text_input(
@@ -1361,7 +1378,7 @@ elif page == "📊 Experiment Dashboard":
                         f"(|error| > {_thresh:.2f}).  "
                         "AI hypotheses are shown below each flag."
                     )
-                    for _, _fl in _flagged.head(5).iterrows():
+                    for _, _fl in _flagged.iterrows():
                         _is_over   = _fl["flag"] == "OVER-PREDICTED"
                         _fc        = "var(--danger)"  if _is_over else "var(--warning)"
                         _fbg       = "rgba(255,69,58,0.10)" if _is_over else "rgba(255,159,10,0.10)"
