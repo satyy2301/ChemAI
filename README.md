@@ -1,138 +1,115 @@
-# ChemAI
+# ChemAI — Open Chemistry Reaction Library
 
-Unified AI Lab for Fuel Discovery.
+Unified AI lab and community reaction library for catalyst discovery, bio pathways, and general organic/catalysis reactions.
 
-ChemAI is a hackathon-ready, closed-loop discovery platform for:
-- Catalyst discovery (materials and reaction performance ranking)
-- Synthetic biology pathway design (organism, enzymes, bottlenecks)
-- Active learning from experimental feedback
+## Features
 
-The app is built for fast setup, easy demoing, and simple deployment.
-
-## What It Does
-
-### 1) Catalyst Co-Pilot
-- Select a target reaction
-- Browse known catalysts
-- Generate AI variants (doping and surface strategies)
-- Rank candidates by activity, stability, and selectivity
-- Visualize trade-offs and log experiment outcomes
-
-### 2) Bio Pathway Designer
-- Select a target biochemical pathway
-- Visualize reaction steps as a graph
-- Identify bottlenecks
-- Get mutation/improvement suggestions
-- Compare reported vs predicted yield
-
-### 3) Active Learning Lab
-- Suggest which candidates to test next using model uncertainty
-- Prioritize high-information experiments
-- Retrain models from new experiment logs
-
-### 4) Experiment Dashboard
-- Predicted vs actual comparisons
-- Error timeline and model metric history
-- Persistent experiment tracking with SQLite
+- **Reaction Lab** — paste SMILES, pick from 50+ templates, predict products, log measured yields
+- **Reaction Library** — browse, search, fork, and flag community reactions
+- **Catalyst Co-Pilot** — AI catalyst engineering with active learning
+- **Bio Pathway Designer** — metabolic pathway simulation and intervention planning
+- **Active Learning Lab** — uncertainty sampling and automated model retraining
+- **Experiment Dashboard** — predicted vs actual, benchmarks, collaboration
+- **REST API** — FastAPI at `/docs` for notebooks and integrations
 
 ## Tech Stack
 
-- Streamlit (frontend and app runtime)
-- scikit-learn (RandomForest-based prediction)
-- Plotly (interactive charts)
-- NetworkX (pathway graph structure)
-- SQLite (experiment and retraining history)
-- pandas / NumPy (data and feature processing)
+- Streamlit (UI) · FastAPI (API) · RDKit (chemistry) · SQLAlchemy (SQLite/Postgres)
+- scikit-learn (yield/catalyst ML) · Plotly · 3Dmol.js
 
-## Project Structure
-
-```text
-chemAI/
-├── app.py
-├── requirements.txt
-├── README.md
-├── .streamlit/
-│   └── config.toml
-├── data/
-│   ├── catalysts_db.json
-│   ├── bio_db.json
-│   └── experiments.db (auto-created/updated)
-└── modules/
-    ├── __init__.py
-    ├── catalyst_module.py
-    ├── bio_module.py
-    └── feedback.py
-```
-
-## Quick Start (Local)
-
-### Prerequisites
-- Python 3.10+
-- pip
-
-### Install
+## Quick Start
 
 ```bash
 pip install -r requirements.txt
-```
-
-### Run
-
-Use one of the commands below:
-
-```bash
 python -m streamlit run app.py
 ```
 
-or
+API (optional, separate terminal):
 
 ```bash
-streamlit run app.py
+uvicorn api.main:app --port 8000 --reload
 ```
 
-App URL (default):
-- http://localhost:8501
+Open http://localhost:8501 (Streamlit) or http://localhost:8000/docs (API).
 
-## Demo Flow (5 minutes)
+The app is open access — no login required.
 
-1. Open Overview and explain the closed-loop workflow.
-2. Go to Catalyst Co-Pilot:
-   - Choose a reaction
-   - Generate AI candidates
-   - Show ranking and trade-off chart
-3. Go to Bio Pathway Designer:
-   - Pick a pathway
-   - Highlight bottleneck + mutation suggestions
-4. Log one experiment result.
-5. Open Active Learning Lab and show suggested next experiments.
-6. Open Dashboard and show predicted vs actual trend.
+## Reaction Lab Workflow
 
-## Deployment
+1. Enter reactant SMILES (one per line) or resolve names via PubChem
+2. Select a reaction template or paste custom SMARTS
+3. Set conditions (T, pH, solvent, catalyst)
+4. Run — RDKit applies SMARTS, heuristic/ML predicts yield
+5. Log measured yield — data feeds community model retraining
 
-### Streamlit Community Cloud (easiest)
-1. Push this repository to GitHub.
-2. Open Streamlit Community Cloud.
-3. Create a new app from this repo.
-4. Set main file path to `app.py`.
-5. Deploy.
+## Database
 
-### Optional: Container deployment
-- Add Docker support for hosting on cloud VMs or container platforms.
+- **Default:** SQLite at `data/chemai.db`
+- **Postgres/Neon:** set `DATABASE_URL=postgresql://...`
+- Legacy `data/experiments.db` is auto-migrated on first run
 
-## Notes
+## Environment Variables
 
-- The current models are lightweight and hackathon-friendly (fast inference).
-- Data is pre-seeded for strong demos and can be extended.
-- SQLite provides a no-infra persistence layer for feedback loops.
+| Variable | Purpose |
+|----------|---------|
+| `DATABASE_URL` | Postgres connection string (optional) |
+| `CHEMAI_API_KEY` | API key for REST endpoints (optional) |
+| `IBM_RXN_API_KEY` | External simulator stub (optional) |
+| `ASKCOS_API_KEY` | External simulator stub (optional) |
 
-## Future Improvements
+## API Endpoints
 
-- Replace synthetic features with pretrained chemistry/biology encoders
-- Add user authentication and team workspaces
-- Integrate real lab APIs and experiment ingestion
-- Add automated benchmarking for candidate quality
+```
+POST /reactions/run          Run a reaction
+GET  /reactions/search?q=    Search library
+POST /reactions/{id}/fork    Fork a reaction
+POST /runs/{id}/results      Submit measured results
+GET  /models/predict         ML yield prediction
+POST /models/retrain         Trigger retrain
+GET  /library/               Browse library
+```
 
-## License
+## Automated Retraining
 
-This project is intended for hackathon and educational use.
-Add a LICENSE file if you plan public/open-source distribution.
+- Weekly cron (Sunday 02:00) via APScheduler in API lifespan
+- Manual trigger from Active Learning Lab or `POST /models/retrain`
+- Only promotes model when holdout MAE improves
+- Quality-gated: runs with `quality_score >= 0.6` enter training
+
+## Benchmarks
+
+Run from Dashboard → Benchmarks tab or:
+
+```bash
+python -c "from modules.benchmarks import run_benchmark; print(run_benchmark('organic_smarts'))"
+```
+
+## Smoke Test
+
+```bash
+python scripts/smoke_test.py
+```
+
+## Data License
+
+Public reaction runs are intended for CC-BY community sharing. Add a LICENSE file for distribution.
+
+## Project Structure
+
+```
+chemAI/
+├── app.py
+├── api/
+├── modules/
+│   ├── db/              SQLAlchemy persistence
+│   ├── reaction_engine.py
+│   ├── reaction_library.py
+│   ├── ml/              Yield model + active learning
+│   ├── benchmarks/
+│   └── integrations/
+├── data/
+│   ├── seed_reactions.json
+└── infra/
+    ├── migrations/
+    └── retrain_jobs/
+```

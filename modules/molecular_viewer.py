@@ -4,6 +4,7 @@ molecular_viewer.py
 Uses 3Dmol.js (CDN) via st.components.v1.html — no extra Python packages required.
 """
 
+import json
 import uuid
 import random
 import numpy as np
@@ -1029,3 +1030,116 @@ def make_protein_viewer_html(
 </html>"""
 
     return html, effect
+
+
+def _smiles_to_xyz(smiles: str) -> str | None:
+    """Convert SMILES to XYZ via RDKit 3D embedding."""
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import AllChem
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return None
+        mol = Chem.AddHs(mol)
+        AllChem.EmbedMolecule(mol, randomSeed=42)
+        AllChem.MMFFOptimizeMolecule(mol)
+        conf = mol.GetConformer()
+        lines = [str(mol.GetNumAtoms()), smiles]
+        for i in range(mol.GetNumAtoms()):
+            pos = conf.GetAtomPosition(i)
+            sym = mol.GetAtomWithIdx(i).GetSymbol()
+            lines.append(f"{sym:2s}  {pos.x:8.4f}  {pos.y:8.4f}  {pos.z:8.4f}")
+        return "\n".join(lines)
+    except Exception:
+        return None
+
+
+def make_smiles_viewer_html(smiles: str, height: int = 320,
+                            width: int = 400, label: str = "") -> tuple[str, str]:
+    """Render SMILES as interactive 3Dmol.js viewer. Returns (html, display_name)."""
+    uid = uuid.uuid4().hex[:8]
+    xyz = _smiles_to_xyz(smiles)
+    display = label or smiles[:40]
+    if not xyz:
+        xyz = MOLECULE_XYZ.get("CO2", "3\nfallback\nC 0 0 0\nO 1.1 0 0\nO -1.1 0 0")
+        display = f"{display} (fallback)"
+
+    xyz_js = json.dumps(xyz)
+    html = f"""<!DOCTYPE html>
+<html><head>
+<script src="https://3Dmol.org/build/3Dmol-min.js"></script>
+<style>
+  body {{ margin:0; background:#0D0D0D; overflow:hidden; }}
+  #v{uid} {{ width:{width}px; height:{height}px; position:relative; }}
+  .lbl {{ position:absolute; bottom:6px; left:8px; color:#86868B; font:11px Inter,sans-serif; }}
+</style></head>
+<body>
+<div id="v{uid}"></div>
+<div class="lbl">{display}</div>
+<script>
+(function(){{
+  var viewer = $3Dmol.createViewer(document.getElementById("v{uid}"), {{backgroundColor:"#0D0D0D"}});
+  viewer.addModel({xyz_js}, "xyz");
+  viewer.setStyle({{}}, {{stick:{{radius:0.15}}, sphere:{{scale:0.25}}}});
+  viewer.zoomTo(); viewer.render();
+}})();
+</script></body></html>"""
+    return html, display
+
+
+def _smiles_to_xyz(smiles: str) -> str | None:
+    """Convert SMILES to XYZ via RDKit 3D embedding."""
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import AllChem
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return None
+        mol = Chem.AddHs(mol)
+        AllChem.EmbedMolecule(mol, randomSeed=42)
+        AllChem.MMFFOptimizeMolecule(mol)
+        conf = mol.GetConformer()
+        lines = [str(mol.GetNumAtoms()), smiles]
+        for i in range(mol.GetNumAtoms()):
+            pos = conf.GetAtomPosition(i)
+            sym = mol.GetAtomWithIdx(i).GetSymbol()
+            lines.append(f"{sym:2s}  {pos.x:8.4f}  {pos.y:8.4f}  {pos.z:8.4f}")
+        return "\n".join(lines)
+    except Exception:
+        return None
+
+
+def make_smiles_viewer_html(smiles: str, height: int = 320,
+                            width: int = 400, label: str = "") -> tuple[str, str]:
+    """
+    Render a SMILES string as interactive 3Dmol.js viewer.
+    Returns (html, display_name).
+    """
+    uid = uuid.uuid4().hex[:8]
+    xyz = _smiles_to_xyz(smiles)
+    display = label or smiles[:40]
+    if not xyz:
+        xyz = MOLECULE_XYZ.get("CO2", "3\nfallback\nC 0 0 0\nO 1.1 0 0\nO -1.1 0 0")
+        display = f"{display} (fallback structure)"
+
+    xyz_escaped = xyz.replace("\\", "\\\\").replace("`", "\\`").replace("\n", "\\n")
+    html = f"""<!DOCTYPE html>
+<html><head>
+<script src="https://3Dmol.org/build/3Dmol-min.js"></script>
+<style>
+  body {{ margin:0; background:#0D0D0D; overflow:hidden; }}
+  #v{uid} {{ width:{width}px; height:{height}px; position:relative; }}
+  .lbl {{ position:absolute; bottom:6px; left:8px; color:#86868B; font:11px Inter,sans-serif; }}
+</style></head>
+<body>
+<div id="v{uid}"></div>
+<div class="lbl">{display}</div>
+<script>
+(function(){{
+  var viewer = $3Dmol.createViewer(document.getElementById("v{uid}"), {{backgroundColor:"#0D0D0D"}});
+  viewer.addModel(`{xyz_escaped}`, "xyz");
+  viewer.setStyle({{}}, {{stick:{{radius:0.15}}, sphere:{{scale:0.25}}}});
+  viewer.zoomTo(); viewer.render();
+}})();
+</script></body></html>"""
+    return html, display

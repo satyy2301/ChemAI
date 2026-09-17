@@ -21,10 +21,90 @@ from modules import bio_module as bm
 from modules import feedback as fb
 from modules import molecular_viewer as mv
 from modules import db_integration as db
+from modules import reaction_engine as re
+from modules import reaction_library as rl
+from modules import reactant_input as ri
+from modules import auth
+from modules import quality as qual
+from modules.ml import active_learning as al_lib
+from modules.benchmarks import run_benchmark
+from modules.integrations.ord_export import export_run_to_ord
+from modules.db.repository import get_repo
 import streamlit.components.v1 as components
 
 # ─── One-time DB init ─────────────────────────────────────────────────────────
 fb.init_db()
+rl.seed_library()
+
+
+def _apply_lab_template_state(rxn_name: str) -> dict | None:
+    """Sync Reaction Lab widgets to a library template by name (call before widgets)."""
+    patch = rl.get_lab_template_patch(rxn_name)
+    if patch:
+        for key, value in patch.items():
+            st.session_state[key] = value
+    return patch
+
+
+def _queue_lab_template(rxn_name: str) -> None:
+    st.session_state["lab_pending_template"] = rxn_name
+
+
+def _queue_lab_reactants(text: str) -> None:
+    st.session_state["lab_pending_reactants"] = text
+    st.session_state.pop("lab_suggestions_key", None)
+
+
+_LAB_TEMPLATE_PLACEHOLDER = "— pick or request template —"
+
+
+def _queue_template_request(reactants: list, smarts: str, user: str) -> int:
+    req_id = rl.queue_unsupported_reaction(
+        f"reactants={reactants}, smarts={smarts or '—'}", user,
+    )
+    st.session_state["lab_last_request_id"] = req_id
+    return req_id
+
+
+def _reset_stale_lab_template(parsed: list[str], rxn_options: list[dict]) -> None:
+    """Clear mismatched template selection when no suggestions are available."""
+    if not parsed or st.session_state.get("lab_suggestions"):
+        return
+    current_label = st.session_state.get("lab_rxn_select", "")
+    current = next((o for o in rxn_options if o["label"] == current_label), None)
+    if current and rl.smarts_reactant_count(current.get("rxn_smarts", "")) == len(parsed):
+        return
+    count_matches = [
+        o for o in rxn_options
+        if rl.smarts_reactant_count(o.get("rxn_smarts", "")) == len(parsed)
+    ]
+    if count_matches:
+        _apply_lab_template_state(count_matches[0]["name"])
+    else:
+        st.session_state["lab_rxn_select"] = _LAB_TEMPLATE_PLACEHOLDER
+        st.session_state["lab_custom_smarts"] = ""
+        st.session_state.pop("lab_preset_reaction", None)
+
+
+def _process_lab_pending_state() -> None:
+    """Apply queued Reaction Lab updates before widgets are instantiated."""
+    if "lab_pending_reactants" in st.session_state:
+        st.session_state["lab_reactants_input"] = st.session_state.pop("lab_pending_reactants")
+        st.session_state.pop("lab_suggestions", None)
+        st.session_state.pop("lab_suggestions_key", None)
+    if "lab_pending_template" in st.session_state:
+        _apply_lab_template_state(st.session_state.pop("lab_pending_template"))
+    if "lab_pending_suggestions" in st.session_state:
+        st.session_state["lab_suggestions"] = st.session_state.pop("lab_pending_suggestions")
+        _parsed, _ = ri.parse_reactant_input(st.session_state.get("lab_reactants_input", ""))
+        if _parsed:
+            st.session_state["lab_suggestions_key"] = "|".join(_parsed)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_reaction_options(reaction_count: int):
+    return rl.get_reaction_options()
+
 
 # ─── Apple Design System CSS ──────────────────────────────────────────────────
 GLOBAL_CSS = """
@@ -311,17 +391,20 @@ st.markdown(GLOBAL_CSS, unsafe_allow_html=True)
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown('<div class="sidebar-logo">⚗️ ChemAI</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-tagline">Unified AI Lab for Fuel Discovery</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-tagline">Open Chemistry Reaction Library</div>', unsafe_allow_html=True)
     st.divider()
     page = st.radio(
         "Navigate",
-        ["🏠 Overview", "⚗️ Catalyst Co-Pilot", "🧬 Bio Pathway Designer",
+        ["🏠 Overview", "🧪 Reaction Lab", "📚 Reaction Library",
+         "⚗️ Catalyst Co-Pilot", "🧬 Bio Pathway Designer",
          "🔄 Active Learning Lab", "📊 Experiment Dashboard"],
         label_visibility="collapsed",
+        key="nav_page",
     )
     st.divider()
-    st.caption("Theme 4 · AI for Catalyst & Pathway Discovery")
-    st.caption("Stack: Streamlit · scikit-learn · Plotly · SQLite")
+    st.caption("ChemAI · RDKit · scikit-learn · SQLAlchemy")
+    _n_rxn = get_repo().count_reactions()
+    st.caption(f"Library: {_n_rxn} reactions")
     st.divider()
     with st.expander("🔑 Database API Keys"):
         st.caption("Materials Project (optional)")
@@ -365,22 +448,27 @@ with st.sidebar:
 if page == "🏠 Overview":
     st.markdown("""
     <div class="apple-hero">
-        <div class="apple-hero-tag">AI-DRIVEN DISCOVERY</div>
-        <h1 class="apple-hero-title">The Future of <span class="gradient-text">Fuel Discovery</span><br>Driven by AI.</h1>
-        <p class="apple-hero-sub">Closed-loop scientific discovery — generation → prediction → experiment → active learning — all in one unified lab.</p>
+        <div class="apple-hero-tag">OPEN CHEMISTRY LIBRARY</div>
+        <h1 class="apple-hero-title">Run, Test &amp; Learn from <span class="gradient-text">Any Reaction</span></h1>
+        <p class="apple-hero-sub">Community reaction library — enter reactants, predict products, log lab results, and retrain models in one closed loop.</p>
     </div>
     """, unsafe_allow_html=True)
 
     cat_all = cm.load_catalysts()
     bio_all = bm.load_pathways()
     exp_df  = fb.get_experiments()
+    lib_rxns = rl.list_reactions()
+    rxn_runs = rl.list_reaction_runs(limit=500)
+    _n_domains = len(set(exp_df["exp_type"])) if not exp_df.empty else 0
+    _lib_domains = len({r.get("domain", "") for r in lib_rxns})
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     for col, icon, val, label in [
-        (c1, "⚗️", len(cat_all),  "Catalyst Entries"),
-        (c2, "🧬", len(bio_all),  "Metabolic Pathways"),
-        (c3, "🔬", len(exp_df),   "Logged Experiments"),
-        (c4, "🌐", len(set(exp_df["exp_type"])) if not exp_df.empty else 0, "Active Domains"),
+        (c1, "🧪", len(lib_rxns),     "Reaction Templates"),
+        (c2, "⚗️", len(cat_all),      "Catalyst Entries"),
+        (c3, "🧬", len(bio_all),      "Metabolic Pathways"),
+        (c4, "🔬", len(exp_df),       "Logged Experiments"),
+        (c5, "📊", len(rxn_runs),     "Reaction Runs"),
     ]:
         col.markdown(f"""
         <div class="apple-metric">
@@ -389,18 +477,20 @@ if page == "🏠 Overview":
             <div class="apple-metric-label">{label}</div>
         </div>""", unsafe_allow_html=True)
 
+    st.caption(f"Covering {_lib_domains} reaction domains · {_n_domains} experiment types in the training flywheel")
+
     st.divider()
 
     col_a, col_b = st.columns(2)
     with col_a:
         st.markdown('<div class="section-header">System Architecture</div>', unsafe_allow_html=True)
         for icon, title, desc in [
-            ("🗄️", "Data Layer",       "Open Catalyst Project · Materials Project · BRENDA enzyme databases"),
-            ("🤖", "AI Generator",     "Rule-based doping & surface mutation generates novel candidates"),
-            ("📈", "ML Predictor",     "Random Forest on element-property features with uncertainty quantification"),
-            ("⚡", "Energy Simulator", "BEP-scaled reaction-coordinate diagrams: activation barriers & ΔG per catalyst"),
-            ("🔬", "3D Mol Viewer",   "Interactive catalyst surface slabs & metabolite 3D structures via 3Dmol.js"),
-            ("🔄", "Feedback Loop",   "SQLite experiment log feeds active learning → model improves each cycle"),
+            ("🧪", "Reaction Engine",  "RDKit SMARTS execution — formulas, names, or SMILES in; predicted products out"),
+            ("📚", "Reaction Library", "60+ public templates (organic, catalysis, bio) — search, fork, contribute"),
+            ("📈", "ML Yield Model",   "Morgan fingerprints + Random Forest with uncertainty; retrains on logged results"),
+            ("🗄️", "Data Layer",       "SQLAlchemy persistence · Catalysis Hub · Materials Project · BRENDA"),
+            ("🔬", "3D Mol Viewer",    "Interactive SMILES, metabolite, and catalyst surface structures via 3Dmol.js"),
+            ("🔄", "Training Flywheel","Quality-gated experiments → auto-retrain → active learning suggestions"),
         ]:
             st.markdown(f"""
             <div class="feature-card" style="margin-bottom:0.75rem;">
@@ -412,12 +502,12 @@ if page == "🏠 Overview":
     with col_b:
         st.markdown('<div class="section-header">Closed-Loop Workflow</div>', unsafe_allow_html=True)
         for num, title, desc in [
-            ("01", "Define Target",    "Choose a reaction and set performance objectives."),
-            ("02", "AI Generation",    "System generates novel catalyst/pathway candidates using doping & mutation rules."),
-            ("03", "ML Prediction",    "Random Forest predicts adsorption energy, yield, and uncertainty for all candidates."),
-            ("04", "Ranking & Viz",    "Trade-off charts and radar plots surface the Pareto-optimal candidates."),
-            ("05", "Lab Experiment",   "Test top candidates; log measured results back to the system."),
-            ("06", "Active Learning",  "Model retrains on new data; uncertainty-sampled candidates get priority next cycle."),
+            ("01", "Enter Reactants",  "Type CO, O2, ethanol, or SMILES — the engine resolves names automatically."),
+            ("02", "Pick Template",    "Choose or auto-suggest a reaction rule (e.g. CO Oxidation for CO + O₂)."),
+            ("03", "Predict",          "RDKit applies SMARTS; heuristic + ML models estimate yield and selectivity."),
+            ("04", "Run in Lab",       "Test the prediction; log measured yield and conditions back to the library."),
+            ("05", "Community Learn",  "Quality-scored results enter the shared dataset and improve models."),
+            ("06", "Explore More",     "Catalyst Co-Pilot, Bio Pathways, and Active Learning for deeper discovery."),
         ]:
             st.markdown(f"""
             <div style="display:flex;gap:1rem;align-items:flex-start;margin-bottom:1rem;">
@@ -429,11 +519,397 @@ if page == "🏠 Overview":
             </div>""", unsafe_allow_html=True)
 
     st.divider()
-    st.markdown('<div class="section-header">Quick Reaction Map</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">Reaction Library at a Glance</div>', unsafe_allow_html=True)
+    _lib_rows = [{
+        "Reaction": r["name"],
+        "Domain": r.get("domain", ""),
+        "Tags": ", ".join(r.get("tags", [])[:3]),
+        "Base Yield": f"{r.get('base_yield', 0):.0%}",
+    } for r in lib_rxns[:25]]
+    st.dataframe(pd.DataFrame(_lib_rows), use_container_width=True, hide_index=True)
+    if len(lib_rxns) > 25:
+        st.caption(f"Showing 25 of {len(lib_rxns)} templates — browse all in **Reaction Library**.")
+
+    st.markdown('<div class="section-header">Catalyst Reaction Map</div>', unsafe_allow_html=True)
     reactions = cm.get_reactions()
     df_r = pd.DataFrame(reactions, columns=["Key", "Reaction"])
     df_r["# Catalysts"] = df_r["Key"].apply(lambda k: len(cm.load_catalysts(k)))
     st.dataframe(df_r[["Reaction", "# Catalysts"]], use_container_width=True, hide_index=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAGE: REACTION LAB
+# ═══════════════════════════════════════════════════════════════════════════════
+elif page == "🧪 Reaction Lab":
+    st.markdown("""
+    <div class="apple-hero">
+        <div class="apple-hero-tag">REACTION LAB</div>
+        <h1 class="apple-hero-title">Run Any <span class="gradient-text">Chemical Reaction</span></h1>
+        <p class="apple-hero-sub">Run library reactions or request new templates — paste SMILES, match a template, set conditions, predict products, and log results to train the community model.</p>
+    </div>""", unsafe_allow_html=True)
+
+    _user = auth.get_current_user()
+    _process_lab_pending_state()
+    _rxn_options = _cached_reaction_options(get_repo().count_reactions())
+    _fork_id = st.session_state.get("fork_reaction_id")
+
+    if "lab_reactants_input" not in st.session_state:
+        st.session_state["lab_reactants_input"] = "CO\nO2"
+
+    _early_parsed, _ = ri.parse_reactant_input(st.session_state["lab_reactants_input"])
+    _rxn_key = "|".join(_early_parsed) if _early_parsed else ""
+    if _early_parsed and st.session_state.get("lab_suggestions_key") != _rxn_key:
+        st.session_state["lab_suggestions_key"] = _rxn_key
+        _fast = rl.suggest_reactions_fast(_early_parsed, top_k=5)
+        st.session_state["lab_suggestions"] = _fast
+        if _fast:
+            _apply_lab_template_state(_fast[0]["reaction"]["name"])
+
+    with st.expander("How to enter reactants & what templates mean", expanded=False):
+        st.markdown(ri.nomenclature_help())
+        st.markdown(ri.template_help())
+    with st.expander("How to discover reactions", expanded=False):
+        st.markdown(ri.discovery_help())
+
+    _preset = st.selectbox(
+        "Quick start (optional)",
+        ["— custom —"] + list(ri.QUICK_PRESETS.keys()),
+        key="lab_preset",
+    )
+    if _preset != "— custom —" and st.button("Load preset", key="load_preset"):
+        p = ri.QUICK_PRESETS[_preset]
+        _queue_lab_reactants(p["reactants"])
+        st.session_state["lab_pending_template"] = p["reaction_name"]
+        st.session_state.pop("lab_result", None)
+        st.rerun()
+
+    st.markdown('<div class="section-header">Step 1 — Reactants</div>', unsafe_allow_html=True)
+    st.caption("Enter formulas (CO, O2), names (oxygen, ethanol), or SMILES — one per line or separated by +")
+    _reactant_text = st.text_area(
+        "Reactants",
+        height=100, key="lab_reactants_input",
+        label_visibility="collapsed",
+    )
+    _parsed, _parse_notes = ri.parse_reactant_input(_reactant_text)
+    if _parse_notes:
+        for n in _parse_notes:
+            st.info(n)
+    if _parsed:
+        st.caption("Resolved: " + "  +  ".join(_parsed))
+
+    rc1, rc2, rc3 = st.columns(3)
+    if rc1.button("Resolve names via PubChem", key="resolve_pubchem"):
+        lines = [re.resolve_smiles(l.strip()) for l in _reactant_text.splitlines() if l.strip()]
+        _queue_lab_reactants("\n".join(lines))
+        st.rerun()
+    if rc2.button("Suggest template", key="suggest_template") and _parsed:
+        st.session_state["lab_pending_suggestions"] = rl.suggest_reactions_deep(_parsed, top_k=5)
+        if st.session_state["lab_pending_suggestions"]:
+            st.session_state["lab_pending_template"] = (
+                st.session_state["lab_pending_suggestions"][0]["reaction"]["name"]
+            )
+        st.rerun()
+    if rc3.button("Clear results", key="clear_lab"):
+        st.session_state.pop("lab_result", None)
+        st.session_state.pop("lab_run_id", None)
+        st.rerun()
+
+    if st.session_state.get("lab_suggestions"):
+        _sug_list = st.session_state["lab_suggestions"]
+        st.success(f"**{len(_sug_list)} matching template(s)** — best: **{_sug_list[0]['reaction']['name']}** → {_sug_list[0]['products_preview']}")
+        for i, sug in enumerate(_sug_list[:5]):
+            rxn = sug["reaction"]
+            if st.button(f"Use: {rxn['name']} → {sug['products_preview']}", key=f"use_sug_{i}"):
+                _queue_lab_template(rxn["name"])
+                st.rerun()
+    elif _parsed:
+        st.warning(
+            "No matching template found for these reactants. "
+            "Try a quick preset, deep-scan, or request a new template below."
+        )
+        nm1, nm2, nm3 = st.columns(3)
+        if nm1.button("Deep-scan templates", key="no_match_suggest", use_container_width=True):
+            st.session_state["lab_pending_suggestions"] = rl.suggest_reactions_deep(_parsed, top_k=5)
+            if st.session_state["lab_pending_suggestions"]:
+                st.session_state["lab_pending_template"] = (
+                    st.session_state["lab_pending_suggestions"][0]["reaction"]["name"]
+                )
+            st.rerun()
+        if nm2.button("Request new template", key="no_match_request", use_container_width=True):
+            _req_id = _queue_template_request(_parsed, "", _user)
+            st.success(f"Template request #{_req_id} queued for community review.")
+        if nm3.button("Browse Reaction Library", key="no_match_browse", use_container_width=True):
+            st.session_state["nav_page"] = "📚 Reaction Library"
+            st.session_state["lib_search"] = "combustion"
+            st.rerun()
+
+    if st.session_state.get("lab_last_request_id"):
+        st.info(f"Template request **#{st.session_state['lab_last_request_id']}** is queued for review.")
+
+    st.markdown('<div class="section-header">Step 2 — Reaction type (template)</div>', unsafe_allow_html=True)
+    st.caption(
+        "The template is auto-selected when possible. You can override below — "
+        "wrong template = error even with correct reactants."
+    )
+    _reset_stale_lab_template(_parsed, _rxn_options)
+    _labels = [o["label"] for o in _rxn_options]
+    if _parsed and not st.session_state.get("lab_suggestions"):
+        _labels = [_LAB_TEMPLATE_PLACEHOLDER] + _labels
+    if "lab_rxn_select" not in st.session_state:
+        _init = _rxn_options[0]
+        if _fork_id:
+            _init = next((o for o in _rxn_options if o["id"] == _fork_id), _init)
+        st.session_state["lab_rxn_select"] = _init["label"]
+        st.session_state["lab_custom_smarts"] = _init.get("rxn_smarts", "")
+
+    def _on_template_change():
+        sel = st.session_state.get("lab_rxn_select")
+        if sel and sel != _LAB_TEMPLATE_PLACEHOLDER:
+            rxn = next((o for o in _rxn_options if o["label"] == sel), None)
+            if rxn:
+                st.session_state["lab_custom_smarts"] = rxn.get("rxn_smarts", "")
+                st.session_state["lab_preset_reaction"] = rxn["name"]
+
+    _chosen_label = st.selectbox(
+        "Reaction template", _labels,
+        key="lab_rxn_select", on_change=_on_template_change,
+    )
+    _chosen_rxn = (
+        next((o for o in _rxn_options if o["label"] == _chosen_label), None)
+        if _chosen_label != _LAB_TEMPLATE_PLACEHOLDER else None
+    )
+    if _parsed and _chosen_rxn:
+        _need = rl.smarts_reactant_count(_chosen_rxn.get("rxn_smarts", ""))
+        if _need and _need != len(_parsed):
+            st.warning(
+                f"**{_chosen_rxn['name']}** expects {_need} reactant(s), "
+                f"but you entered {len(_parsed)}. "
+                "Run will auto-pick a matching template, or click **Suggest template** above."
+            )
+    elif _parsed and not _chosen_rxn:
+        st.info("Pick a template from the list, or click **Request new template** above.")
+    _custom_smarts = st.text_input(
+        "Advanced: custom SMARTS (leave as-is unless you know SMARTS)",
+        key="lab_custom_smarts",
+    )
+
+    st.markdown('<div class="section-header">Step 3 — Conditions</div>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        _temp = st.number_input("Temperature (°C)", value=25.0, key="lab_temp")
+        _pressure = st.number_input("Pressure (bar)", value=1.0, key="lab_pressure")
+    with c2:
+        _ph = st.number_input("pH", value=7.0, step=0.1, key="lab_ph")
+        _solvent = st.selectbox("Solvent", ["water", "ethanol", "toluene", "DMF", "DMSO", "THF", "polar aprotic"], key="lab_solvent")
+    with c3:
+        _catalyst = st.text_input("Catalyst (optional)", key="lab_catalyst")
+        _visibility = st.selectbox("Visibility", ["public", "private"], key="lab_vis")
+
+    _conditions = {
+        "temperature_c": _temp, "pressure_bar": _pressure,
+        "ph": _ph, "solvent": _solvent, "catalyst": _catalyst,
+    }
+
+    st.markdown('<div class="section-header">Step 4 — Safety Check & Run</div>', unsafe_allow_html=True)
+    _reactants = _parsed if _parsed else [l.strip() for l in _reactant_text.splitlines() if l.strip()]
+
+    if st.button("Run Reaction", type="primary", use_container_width=True, key="lab_run"):
+        with st.spinner("Running reaction engine..."):
+            _active_rxn = None
+            if _chosen_rxn:
+                _active_rxn = dict(_chosen_rxn)
+                _active_rxn["rxn_smarts"] = _custom_smarts or _chosen_rxn.get("rxn_smarts")
+            _result, _used_rxn = rl.run_with_best_template(
+                _reactants, _conditions, preferred_rxn=_active_rxn,
+            )
+            if _used_rxn and (_chosen_rxn is None or _used_rxn.get("name") != _chosen_rxn.get("name")):
+                _queue_lab_template(_used_rxn["name"])
+            st.session_state["lab_result"] = _result
+            st.session_state["lab_used_rxn"] = _used_rxn
+            if _result.validity and not (_result.safety and _result.safety.blocked):
+                _run_id = rl.create_reaction_run(
+                    reaction_id=_used_rxn.get("id") if _used_rxn else (_chosen_rxn or {}).get("id"),
+                    conditions=_conditions,
+                    predicted=_result.predicted_outcome,
+                    user_id=_user,
+                )
+                st.session_state["lab_run_id"] = _run_id
+
+    if "lab_result" in st.session_state:
+        _res = st.session_state["lab_result"]
+        if _res.safety and _res.safety.blocked:
+            st.error("Reaction blocked by safety screening.")
+            for a in _res.safety.alerts:
+                st.warning(a)
+        elif not _res.validity:
+            st.error("Reaction failed: " + "; ".join(_res.warnings[:3]))
+            st.markdown("""
+**Common fixes:**
+- Use **O2** or **oxygen** for oxygen gas (not plain `O` unless you mean O₂)
+- Use **water** or **H2O** for water
+- Pick the right template — for CO + O₂ use **CO Oxidation**, not Water Splitting OER
+- Click **Suggest template** to auto-find a matching reaction
+            """)
+            _retry = rl.suggest_reactions_fast(_reactants, top_k=3)
+            if _retry:
+                st.markdown("**Try one of these templates instead:**")
+                for i, sug in enumerate(_retry):
+                    rxn = sug["reaction"]
+                    if st.button(f"{rxn['name']} → {sug['products_preview']}", key=f"retry_{i}"):
+                        _queue_lab_template(rxn["name"])
+                        st.session_state.pop("lab_result", None)
+                        st.rerun()
+            if st.button("Request new template", key="req_template"):
+                _req_id = _queue_template_request(_reactants, _custom_smarts, _user)
+                st.success(f"Template request #{_req_id} queued for community review.")
+        else:
+            _used = st.session_state.get("lab_used_rxn") or _chosen_rxn or {}
+            st.success(
+                f"Products generated · **{_used.get('name', '—')}** · "
+                f"Tier {_res.engine_tier} · Confidence {_res.confidence:.2f}"
+            )
+            if _res.warnings:
+                for w in _res.warnings:
+                    st.caption(f"⚠ {w}")
+
+            _out = _res.predicted_outcome
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Predicted Yield", f"{_out.get('yield', 0):.1%}")
+            m2.metric("Selectivity", f"{_out.get('selectivity', 0):.1%}")
+            m3.metric("Uncertainty", f"±{_out.get('uncertainty', 0):.3f}")
+            m4.metric("Engine Tier", _res.engine_tier)
+
+            st.markdown("**Products**")
+            for i, p in enumerate(_res.products):
+                st.code(p, language=None)
+                _html, _name = mv.make_smiles_viewer_html(p, height=280, width=500, label=f"Product {i+1}")
+                components.html(_html, height=300, scrolling=False)
+
+            st.markdown('<div class="section-header">Step 5 — Log Measured Result</div>', unsafe_allow_html=True)
+            col_p, col_a = st.columns(2)
+            _pred_y = col_p.number_input("Predicted yield", value=float(_out.get("yield", 0)), format="%.3f", key="lab_pred_y")
+            _actual_y = col_a.number_input("Measured yield (lab)", value=float(_out.get("yield", 0)), format="%.3f", key="lab_actual_y")
+            _notes = st.text_input("Notes", key="lab_notes")
+            _prov_labels = {"internal_experiment": "Internal", "published_paper": "Published",
+                            "screening": "Screening", "db_retrieved": "DB", "ai_simulation": "Simulation"}
+            cp1, cp2 = st.columns(2)
+            _prov = cp1.selectbox("Provenance", list(_prov_labels.keys()),
+                                   format_func=lambda x: _prov_labels[x], key="lab_prov")
+            _dq = cp2.selectbox("Data quality", ["good", "uncertain", "outlier"], key="lab_dq")
+
+            if st.button("Submit Result", key="lab_submit"):
+                _run_id = st.session_state.get("lab_run_id")
+                _actual = {"yield": _actual_y, "selectivity": _out.get("selectivity", _actual_y)}
+                _run_data = {
+                    "reaction_id": _used.get("id"),
+                    "conditions": _conditions, "predicted": _out,
+                    "actual": _actual, "provenance": _prov,
+                }
+                _gated = qual.score_and_gate_run(_run_data, _dq, _user)
+                if _run_id:
+                    rl.update_reaction_run_actual(_run_id, _actual, _gated["quality_score"])
+                fb.log_experiment(
+                    exp_type="reaction", name=_used.get("name", "—"),
+                    pred_value=_pred_y, actual_value=_actual_y,
+                    metric="reaction_yield", notes=_notes, user=_user,
+                    data_quality=_dq, source_provenance=_prov,
+                    reaction_run_id=_run_id,
+                )
+                if _gated["training_eligible"]:
+                    get_repo().increment_reputation(_user, 0.1)
+                st.success(f"Logged by **{_user}** · Quality score: {_gated['quality_score']:.2f}")
+                st.balloons()
+
+            _run_id = st.session_state.get("lab_run_id")
+            if _run_id:
+                _run = rl.get_reaction_run(_run_id)
+                if _run:
+                    st.download_button("Export ORD JSON", data=export_run_to_ord(_run, _used),
+                                       file_name=f"run_{_run_id}.ord.json", mime="application/json")
+                    st.download_button("Export RXN", data=fb.export_reaction_rxn(_run),
+                                       file_name=f"run_{_run_id}.rxn", mime="text/plain")
+
+    _pending_jobs = [j for j in get_repo().get_pending_jobs(5) if j["job_type"] == "external_sim"]
+    if _pending_jobs:
+        st.markdown('<div class="section-header">Job Status</div>', unsafe_allow_html=True)
+        for j in _pending_jobs:
+            st.info(f"Job #{j['id']}: {j['job_type']} — {j['status']}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAGE: REACTION LIBRARY
+# ═══════════════════════════════════════════════════════════════════════════════
+elif page == "📚 Reaction Library":
+    st.markdown("""
+    <div class="apple-hero">
+        <div class="apple-hero-tag">REACTION LIBRARY</div>
+        <h1 class="apple-hero-title">Community <span class="gradient-text">Reaction Library</span></h1>
+        <p class="apple-hero-sub">Browse, search, and fork public reactions contributed by the community.</p>
+    </div>""", unsafe_allow_html=True)
+
+    _user = auth.get_current_user()
+    s1, s2, s3 = st.columns([2, 1, 1])
+    with s1:
+        _search_q = st.text_input("Search reactions", key="lib_search")
+    with s2:
+        _domain = st.selectbox("Domain", ["all", "organic", "catalysis", "bio"], key="lib_domain")
+    with s3:
+        _tag = st.text_input("Tag filter", key="lib_tag")
+
+    _domain_f = None if _domain == "all" else _domain
+    _reactions = rl.search_reactions(_search_q, _domain_f, _tag or None)
+
+    st.markdown(f"**{len(_reactions)}** reactions found")
+    for rxn in _reactions[:30]:
+        with st.expander(f"{rxn['name']} · {rxn['domain']} · {len(rxn.get('tags', []))} tags"):
+            st.code(rxn.get("rxn_smarts", ""), language=None)
+            st.caption(f"Reactants: {', '.join(rxn.get('reactants', [])[:3])}")
+            st.caption(f"Base yield: {rxn.get('base_yield', 0.75):.0%} · By: {rxn.get('created_by', 'system')}")
+            fc1, fc2, fc3 = st.columns(3)
+            if fc1.button(f"Fork", key=f"fork_{rxn['id']}"):
+                new_id = rl.fork_reaction(rxn["id"], _user)
+                st.session_state["fork_reaction_id"] = new_id
+                st.success(f"Forked as reaction #{new_id}. Open Reaction Lab to run it.")
+            if fc2.button(f"Use in Lab", key=f"use_{rxn['id']}"):
+                st.session_state["fork_reaction_id"] = rxn["id"]
+                _queue_lab_reactants("\n".join(rxn.get("reactants", [])))
+                st.session_state["lab_pending_template"] = rxn["name"]
+                st.info("Switch to Reaction Lab to run this reaction.")
+            if fc3.button(f"Flag", key=f"flag_{rxn['id']}"):
+                get_repo().add_flag("reaction", rxn["id"], _user, "Community flag")
+                st.warning("Reaction flagged for review.")
+
+    st.divider()
+    st.markdown('<div class="section-header">Pending Template Requests</div>', unsafe_allow_html=True)
+    _pending_reqs = rl.list_reaction_requests(status="pending")
+    if _pending_reqs:
+        for _req in _pending_reqs[:10]:
+            st.caption(
+                f"#{_req['id']} · {_req['user_id']} · "
+                f"{_req['user_input'][:80]}{'…' if len(_req['user_input']) > 80 else ''}"
+            )
+    else:
+        st.caption("No pending requests. Use **Request new template** in Reaction Lab to queue one.")
+
+    st.divider()
+    st.markdown('<div class="section-header">Recent Public Runs</div>', unsafe_allow_html=True)
+    _runs = rl.list_reaction_runs(limit=20)
+    if _runs:
+        import pandas as pd
+        _rows = []
+        for r in _runs:
+            pred = r.get("predicted", {})
+            actual = r.get("actual", {})
+            _rows.append({
+                "ID": r["id"], "User": r["user_id"],
+                "Yield (pred)": pred.get("yield", "—"),
+                "Yield (actual)": actual.get("yield", "—"),
+                "Quality": r.get("quality_score", 0),
+                "Tier": pred.get("engine_tier", "—"),
+            })
+        st.dataframe(pd.DataFrame(_rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No reaction runs yet. Be the first to contribute from Reaction Lab!")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -811,7 +1287,7 @@ elif page == "⚗️ Catalyst Co-Pilot":
             )
             cat_quality = col_qual.selectbox("Data quality", ["good", "uncertain", "outlier"], key="cat_quality")
             if st.button("✅ Submit Experiment", key="cat_submit"):
-                _user = st.session_state.get("current_user", "anonymous")
+                _user = auth.get_current_user()
                 fb.log_experiment(
                     exp_type="catalyst", name=exp_name,
                     pred_value=pred_val, actual_value=actual_val,
@@ -1112,7 +1588,7 @@ elif page == "🧬 Bio Pathway Designer":
             )
             bio_quality = col_qual2.selectbox("Data quality", ["good", "uncertain", "outlier"], key="bio_quality")
             if st.button("✅ Submit Bio Experiment"):
-                _user = st.session_state.get("current_user", "anonymous")
+                _user = auth.get_current_user()
                 fb.log_experiment(
                     exp_type="bio", name=chosen_path["name"],
                     pred_value=pred_val, actual_value=actual_val, metric="yield", notes=notes,
@@ -1263,8 +1739,15 @@ elif page == "🔄 Active Learning Lab":
         m2.metric("RMSE",        f"{bio_metrics['rmse']:.4f}" if bio_metrics["rmse"] else "N/A")
         m3.metric("Experiments", bio_metrics["n"])
 
-    if st.button("🔁 Retrain Both Models on Latest Data", use_container_width=True):
+    _last_retrain = get_repo().get_latest_promoted_model("reaction", "yield")
+    if _last_retrain:
+        st.caption(f"Last auto-retrain: {_last_retrain.get('timestamp', '—')} · MAE {_last_retrain.get('mae', 0):.4f}")
+
+    if st.button("Retrain All Models on Latest Data", use_container_width=True):
         with st.spinner("Retraining..."):
+            from infra.retrain_jobs.retrain_worker import run_retrain_job
+            _retrain_result = run_retrain_job(force=True)
+            st.session_state["last_retrain_result"] = _retrain_result
             cat_exps = fb.get_experiments("catalyst")
             if not cat_exps.empty:
                 extra_cats = []
@@ -1293,7 +1776,11 @@ elif page == "🔄 Active Learning Lab":
                 bio_predictor.retrain(extra_paths, bm.load_pathways())
                 new_mae = fb.compute_metrics("bio")["mae"] or 0.02
                 fb.record_retrain("bio", mae=new_mae*0.88, rmse=new_mae*1.1, n_samples=len(bio_exps))
-        st.success("✅ Models retrained on latest experimental data!")
+        _rr = st.session_state.get("last_retrain_result", {})
+        if _rr.get("promoted"):
+            st.success(f"Models retrained and promoted! MAE={_rr.get('mae', 0):.4f}")
+        else:
+            st.warning(f"Retrain complete (not promoted). Status: {_rr.get('status', 'unknown')}")
         st.rerun()
 
 
@@ -1309,7 +1796,10 @@ elif page == "📊 Experiment Dashboard":
     </div>
     """, unsafe_allow_html=True)
 
-    tab1, tab2, tab3, tab4 = st.tabs(["All Experiments", "Catalyst Model", "Bio Model", "👥 Collaboration"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "All Experiments", "Catalyst Model", "Bio Model", "Reaction Model",
+        "Benchmarks", "Collaboration",
+    ])
 
     with tab1:
         df_all = fb.get_experiments()
@@ -1434,8 +1924,53 @@ elif page == "📊 Experiment Dashboard":
             st.dataframe(df_bio[["timestamp","name","pred_value","actual_value","notes"]], use_container_width=True, hide_index=True)
 
     with tab4:
+        st.markdown('<div class="section-header">Reaction Yield Predictor</div>', unsafe_allow_html=True)
+        st.plotly_chart(fb.plot_model_improvement("reaction"), use_container_width=True)
+        st.plotly_chart(fb.plot_predicted_vs_actual("reaction"), use_container_width=True)
+        df_rxn = fb.get_experiments("reaction")
+        if not df_rxn.empty:
+            st.dataframe(df_rxn[["timestamp", "name", "pred_value", "actual_value", "notes"]],
+                         use_container_width=True, hide_index=True)
+        else:
+            st.info("No reaction experiments yet. Run reactions in Reaction Lab.")
+
+        st.markdown('<div class="section-header">Community Data Gaps</div>', unsafe_allow_html=True)
+        for sug in al_lib.get_library_suggestions(top_k=5):
+            st.markdown(f"""
+            <div class="apple-card-sm" style="border-left:3px solid var(--cyan);margin-bottom:0.5rem;">
+                <div style="font-size:0.85rem;color:var(--text-1);">{sug['suggestion']}</div>
+                <div style="font-size:0.75rem;color:var(--text-2);">
+                    Priority: {sug['priority']:.3f} · Data points: {sug['data_points']}
+                </div>
+            </div>""", unsafe_allow_html=True)
+
+        _contrib = get_repo().top_contributors(5)
+        if not _contrib.empty:
+            st.markdown('<div class="section-header">Top Contributors</div>', unsafe_allow_html=True)
+            st.dataframe(_contrib, use_container_width=True, hide_index=True)
+
+    with tab5:
+        st.markdown('<div class="section-header">Benchmark Suites</div>', unsafe_allow_html=True)
+        b1, b2 = st.columns(2)
+        if b1.button("Run Organic SMARTS Benchmark", use_container_width=True):
+            with st.spinner("Running..."):
+                _bm = run_benchmark("organic_smarts")
+            st.session_state["last_benchmark"] = _bm
+        if b2.button("Run Fuel Reactions Benchmark", use_container_width=True):
+            with st.spinner("Running..."):
+                _bm = run_benchmark("fuel_reactions")
+            st.session_state["last_benchmark"] = _bm
+        if "last_benchmark" in st.session_state:
+            _bm = st.session_state["last_benchmark"]
+            st.metric("Pass Rate", f"{_bm.get('pass_rate', 0):.0%}")
+            st.json(_bm)
+        _bm_hist = get_repo().get_benchmark_runs(limit=10)
+        if not _bm_hist.empty:
+            st.dataframe(_bm_hist, use_container_width=True, hide_index=True)
+
+    with tab6:
         # ── User Activity ──────────────────────────────────────────────────────
-        st.markdown('<div class="section-header">👥 User Activity</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-header">User Activity</div>', unsafe_allow_html=True)
         _activity = fb.get_user_activity()
         if _activity.empty:
             st.info("No user activity yet. Sign in and log an experiment to appear here.")
@@ -1470,7 +2005,7 @@ elif page == "📊 Experiment Dashboard":
             <div class="apple-card" style="margin-bottom:0.8rem;">
               <div class="step-label">ADD ANNOTATION</div>
             </div>""", unsafe_allow_html=True)
-            _ann_user = st.session_state.get("current_user", "anonymous")
+            _ann_user = auth.get_current_user()
             st.caption(f"Posting as **{_ann_user}**")
             _ann_exp_type = st.selectbox("Experiment type", ["catalyst", "bio"], key="ann_type")
             _ann_exps = fb.get_experiments(_ann_exp_type)

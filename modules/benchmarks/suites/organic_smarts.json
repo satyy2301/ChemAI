@@ -1,0 +1,28 @@
+{
+  "name": "organic_smarts",
+  "description": "SMARTS template sanity checks",
+  "tests": [
+    {
+      "name": "Esterification produces products",
+      "type": "smarts",
+      "reactants": ["CC(=O)O", "CO"],
+      "rxn_smarts": "[C:1](=[O:2])[O;H1].[O;H1][C:3]>>[C:1](=[O:2])[O:3]",
+      "conditions": {"temperature_c": 80, "solvent": "toluene"},
+      "base_yield": 0.82
+    },
+    {
+      "name": "Hydrogenation alkene",
+      "type": "smarts",
+      "reactants": ["C=C"],
+      "rxn_smarts": "[C:1]=[C:2]>>[C:1][C:2]",
+      "conditions": {"temperature_c": 25, "catalyst": "Pd/C"},
+      "base_yield": 0.90,
+      "min_yield": 0.5
+    },
+    {
+      "name": "Library has 50+ templates",
+      "type": "library_count",
+      "min_count": 50
+    }
+  ]
+}
